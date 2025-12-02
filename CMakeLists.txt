@@ -1,8 +1,8 @@
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.25)
 project("libiothconf"
     DESCRIPTION "ioth autoconfiguration"
     HOMEPAGE_URL "https://github.com/rd235/libiothconf"
-    VERSION 0.1.0
+    VERSION 0.1.1
     LANGUAGES C)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ggdb -D_FORTIFY_SOURCE=2 -O2 -pedantic -Wall -Wextra")
@@ -44,6 +44,12 @@ install(TARGETS iothconf DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES iothconf.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 # install(FILES ${CMAKE_CURRENT_BINARY_DIR}/iothconf.pc
 # DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+
+add_executable(ipconf ipconf.c)
+target_link_libraries(ipconf iothconf)
+
+install(TARGETS ipconf
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 add_subdirectory(man)
 add_subdirectory(test)
