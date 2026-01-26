@@ -101,7 +101,7 @@ The following example creates an IoTh stack with one interface connected to `vxv
 ## Options supported by `ioth_config` and `ioth_newstackc`
  *   `stack=...`: (`ioth_newstackc` only) define the ip stack implementation
  *   `vnl=...`: (`ioth_newstackc` only) define the vde network to join
- *   `iface=...` : select the interface e.g. `iface=eth0` (default value vde0)
+ *   `iface=...` : select the interface e.g. `iface=eth0` (default value `vde0`)
  *   `ifindex=...` : id of the interface (it can be used instead of `iface`)
  *   `fqdn=....` : set the fully qualified domain name for dhcp, dhcpv6 slaac-hash-autoconf
  *   `mac=...` : (or macaddr) define the macaddr for eth here below. (e.g. `eth,mac=10:a1:b2:c3:d4:e5`)
@@ -119,6 +119,27 @@ The following example creates an IoTh stack with one interface connected to `vxv
  *   `domain=....` : set a static domain for the dns search
  *   `debug` : show the status of the current configuration parameters
  *   `-static, -eth, -dhcp, -dhcp6, -rd, -auto, -auto4, -auto6` (and all the synonyms + a heading minus) clean (undo) the configuration
+
+## `ipconf` iothconf using the CLI
+
+The `ipconf` command configures the current TCP-IP stack using the
+iothconf syntax.
+
+Example:
+
+start a vdens:
+```
+vdens vxvde://234.0.0.1
+```
+The following command:
+```
+ipconf eth,ip=10.0.0.1/24
+```
+is equivalent to:
+```
+ip link set vde0 up
+ip addr add 10.0.0.1/24 dev vde0
+```
 
 ## TODO: missing features
 
