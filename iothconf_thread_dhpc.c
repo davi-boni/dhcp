@@ -484,19 +484,42 @@ static int _read_ip_leasetime(void *data, void *arg) {
 	return 0;
 }
 
+int set_timer_poll(int *timerfd, struct itimerspec *tspec, uint32_t leasetime, struct pollfd *plfd){
+	
+	//E' intero senza segno il leasetime, non ci sono problemi su campo nsec
+	tspec->it_value.tv_sec = leasetime;		   
+    tspec->it_value.tv_nsec = 0; 
+	tspec->it_interval.tv_sec = 0; 
+    tspec->it_interval.tv_nsec = 0; 
+
+	 
+	if(timerfd_settime(*timerfd, 0, tspec, NULL) == -1){
+		fprintf(stderr, "Errore nell'attivazione del timer (timerfd_settime)\n"); 
+		return 1;  
+	}
+	
+	plfd->fd = *timerfd;            
+    plfd->events = POLLIN;  
+
+	return 0; 
+
+}
 
 
-struct itimerspec timerspec1; 
-struct itimerspec timerspec2; 
-
-struct pollfd fd1;
-struct pollfd fd2;            
 in_addr_t dhcp_server_add;   
 uint32_t leasetime;        
     
 
 int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, int state=INIT){
-    while (state != UNBOUND){
+    int timerfd = timerfd_create(CLOCK_MONOTONIC, 0);
+	if(timerfd == -1) {
+    	perror("timerfd_create");
+    	return 1;
+	}
+	struct itimerspec timerspec1, timerspec2; 
+	struct pollfd plfd;    
+	while (state != UNBOUND){
+	  
        switch (state){
         case INIT:{
             int rv = iothconf_dhcp_proto(stack, ifindex, fqdn, config_flags);
@@ -506,35 +529,10 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 				time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
 				ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_ip_leasetime, &timestamp);
 
-				int timerfd1;
-				int timerfd2; 
-        		
-       			timerspec1.it_value.tv_sec = ms / 1000;  
-        		timerspec1.it_value.tv_nsec = 0; 
-				timerspec1.it_interval.tv_sec = 0; 
-        		timerspec1.it_interval.tv_nsec = 0; 
-
-				timerspec2.it_value.tv_sec = ms / 1000;  
-        		timerspec2.it_value.tv_nsec = 0;
-				timerspec2.it_interval.tv_sec = 0; 
-        		timerspec2.it_interval.tv_nsec = 0; 
-
-				fd1.fd = timerfd1;            
-    			fd1.events = POLLIN;  
-				fd2.fd = timerfd2;            
-    			fd2.events = POLLIN;
-
-				
-
-
-
-				/* Spostare in caso */
-				//Attivo il timer 
-				if(timerfd_settime(timerfd, 0, &timerspec, NULL) == -1){
-					fprintf(stderr, "Errore nell'attivazione del timer (timerfd_settime)\n"); 
-					//gestione errori diversi da dhcp 
+				if( set_timer_poll(&timerfd, &timerspec1, leasetime >> 1, &fd1) == 1 ){
+					//Errori e uscita 
 				}
-
+        	
             }else{
                 state = UNBOUND;
             }
@@ -542,38 +540,37 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
         break;
         case BOUND:{
             //aspetta il timer t1 bloccante
-			int ret1 = poll(fd1, 1, -1); 
+			int ret1 = poll(&plfd, 1, -1); 
 			if(ret1 == -1){
 				fprintf(stderr, "Errore nella poll\n");
 				return 1;
 			}
 
-			if(fd1.revents & POLLIN){  
-				//scade t1 
+			if(plfd.revents & POLLIN){  
+				//scade t1, si avvia t2 
+				if( set_timer_poll(&timerfd, &timerspec2, (leasetime * 7)/8 - (leasetime >> 1) , &plfd) == 1 ){
+					//Errori e uscita 
+				}
             	state = RENEW;	 
 			}
-
         }
         break;
         case RENEW:{
             //modifica il pacchetto per fare la richiesta al server in while fino al T2 non bloccante
             
-			//leggi  l addr del dhcp server
+			//leggi l' addr del dhcp server
 			time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
 			ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_SERVER, _read_dhcp_serverip, &timestamp);
 			// Ora in dhcp_server_add ci dovrebbe essere l'ip 
 			
 			
 			
-			
-			
-			
-			
-			
 			int ret2;
-			while(ret2 = poll(fd2,1,0)){
+			while( (ret2 = poll(&plfd,1,0)) == 0){
                 if (risposta == success){
-                    //risetta il T1 e il T2
+                    //risetta il T1 (il T2 si avvierà quando scade T1) e il T2
+					
+
                     state = BOUND;
                     break;
                 }else{
@@ -581,6 +578,10 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
                     state = INIT;
                 }
             }
+
+			//Scade t2
+			
+
             if(no_risposta)
             state = REBIND;
         }
@@ -609,7 +610,9 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
         default:
         break;
         }
+		
     }
-    
+	close(timerfd);
+
     
 }
