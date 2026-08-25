@@ -526,12 +526,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
             if (rv == 0){
                 iothconf_ip_update(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, config_flags);
                 state = BOUND;
-				time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
-				ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_ip_leasetime, &timestamp);
-
-				if( set_timer_poll(&timerfd, &timerspec1, leasetime >> 1, &fd1) == 1 ){
-					//Errori e uscita 
-				}
+				
         	
             }else{
                 state = UNBOUND;
@@ -539,6 +534,12 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
         }
         break;
         case BOUND:{
+			time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
+			ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_ip_leasetime, &timestamp);
+
+			if( set_timer_poll(&timerfd, &timerspec1, leasetime >> 1, &fd1) == 1 ){
+					//Errori e uscita 
+			}
             //aspetta il timer t1 bloccante
 			int ret1 = poll(&plfd, 1, -1); 
 			if(ret1 == -1){
@@ -568,31 +569,31 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 			int ret2;
 			while( (ret2 = poll(&plfd,1,0)) == 0){
                 if (risposta == success){
-                    //risetta il T1 (il T2 si avvierà quando scade T1) e il T2
-					
-
                     state = BOUND;
                     break;
                 }else{
                     //void current ip
                     state = INIT;
+					break; 
                 }
             }
 
 			//Scade t2
-			
+			if(plfd.revents & POLLIN){ 
 
-            if(no_risposta)
-            state = REBIND;
-        }
+            	if(no_risposta)
+					state = REBIND;
+			}
+			
+		}
         break;
         case REBIND:{
             //fino al lease time 
-            while(tempo<lease_time){
+            int ret2;
+			while( (ret2 = poll(&plfd,1,0)) == 0){
                 //modifica il pacchetto per fare la richiesta ma in broadcast fino al lease_time
                 if (risposta){
                     if (risposta == success){
-                        //risetta il T1 e il T2
                         state = BOUND;
                         break;
                     }else{
