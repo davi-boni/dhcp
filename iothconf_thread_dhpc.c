@@ -86,6 +86,8 @@ struct dhcpdata {
 #define BOUND 1
 #define RENEW 2
 #define REBIND 3
+#define BROADCASTADDR 0xffffffff
+#define DHCP_R_REQUEST 9
 
 __attribute__((__packed__)) struct bootp_head {
 	uint8_t op;
@@ -201,10 +203,11 @@ static void add_dhcp_opt_parlist(FILE *f, ...) {
 /* dialog functions. dhcp_send and dhcp_get use indirect recursion.
 	 In this way temporary data can be stored on the stack */
 static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data);
-static int dhcp_send(int type, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data) {
+static int dhcp_send(int type, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data, uint32_t daddr) {
 	switch (type) {
 		case DHCPDISCOVER:
 		case DHCPREQUEST:
+		case DHCP_R_REQUEST:
 			break;
 		default:
 			return errno = EINVAL, -1;
@@ -216,7 +219,7 @@ static int dhcp_send(int type, int fd, const struct sockaddr_ll *dest_addr, stru
 		.ip_h.ihl = 5,
 		.ip_h.ttl = 64,
 		.ip_h.protocol = SOL_UDP, //UDP
-		.ip_h.daddr = 0xffffffff,
+		.ip_h.daddr = daddr //0xffffffff,
 		.udp_h.uh_sport = htons(DHCP_CLIENTPORT),
 		.udp_h.uh_dport = htons(DHCP_SERVERPORT),
 		.bootp_h.op = 1, // boot req
@@ -234,7 +237,7 @@ static int dhcp_send(int type, int fd, const struct sockaddr_ll *dest_addr, stru
 	add_dhcp_opt_type(optf, type);
 	add_dhcp_opt_maxsize(optf);
 	add_dhcp_opt_clientid(optf, data->macaddr);
-	if (type != DHCPDISCOVER) {
+	if (type == DHCPREQUEST) {
 		add_dhcp_opt(optf, OPTION_REQIP, sizeof(data->clientaddr), &data->clientaddr);
 		add_dhcp_opt(optf, OPTION_SERVID, sizeof(data->serveraddr), &data->serveraddr);
 	}
@@ -306,6 +309,7 @@ static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, s
 	switch (sendtype) {
 		case DHCPDISCOVER: type = DHCPOFFER; break;
 		case DHCPREQUEST: type = DHCPACK; break;
+		case DHCP_R_REQUEST: type = DHCPACK; break;
 		default:
 											return errno = EINVAL, -1;
 	}
@@ -369,7 +373,7 @@ static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, s
 				memcpy(&data->serveraddr, answ_server, sizeof(data->serveraddr));
 				memcpy(&data->clientaddr, inbuf.bootp_h.yiaddr, sizeof(data->clientaddr));
 				if (answ_type == DHCPOFFER)
-					return dhcp_send(DHCPREQUEST, fd, dest_addr, data);
+					return dhcp_send(DHCPREQUEST, fd, dest_addr, data, BROADCASTADDR);
 				else if (answ_type == DHCPACK) {
 					ioth_confdata_add_data(data->stack, data->ifindex, IOTH_CONFDATA_DHCP4_SERVER, data->timestamp, 0,
 							struct in_addr, data->serveraddr.s_addr);
@@ -445,7 +449,7 @@ static int iothconf_dhcp_proto(struct ioth *stack, unsigned int ifindex, const c
 	};
 	ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
 	//loop
-	int rv = dhcp_send(DHCPDISCOVER, packet_socket, &sll, &dhcpdata);
+	int rv = dhcp_send(DHCPDISCOVER, packet_socket, &sll, &dhcpdata, BROADCASTADDR);
 	ioth_close(packet_socket);
 	return rv;
 }
@@ -484,6 +488,16 @@ static int _read_ip_leasetime(void *data, void *arg) {
 	return 0;
 }
 
+static int _read_clientip(void *data, void *arg){
+	time_t *latest_timestamp = arg;
+	struct ioth_confdata_ipaddr *addr = data; 
+	time_t timestamp = ioth_confdata_gettimestamp(data);
+	if(timestamp >= *latest_timestamp) {
+		client_addr = addr->addr;
+	}
+	return 0;
+}
+
 int set_timer_poll(int *timerfd, struct itimerspec *tspec, uint32_t leasetime, struct pollfd *plfd){
 	
 	//E' intero senza segno il leasetime, non ci sono problemi su campo nsec
@@ -506,7 +520,7 @@ int set_timer_poll(int *timerfd, struct itimerspec *tspec, uint32_t leasetime, s
 }
 
 
-in_addr_t dhcp_server_add;   
+in_addr_t dhcp_server_add, client_addr;   
 uint32_t leasetime;        
     
 
@@ -524,16 +538,14 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
         case INIT:{
             int rv = iothconf_dhcp_proto(stack, ifindex, fqdn, config_flags);
             if (rv == 0){
-                iothconf_ip_update(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, config_flags);
                 state = BOUND;
-				
-        	
             }else{
                 state = UNBOUND;
             }
+			break;
         }
-        break;
         case BOUND:{
+			iothconf_ip_update(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, config_flags);
 			time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
 			ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_ip_leasetime, &timestamp);
 
@@ -549,64 +561,111 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 
 			if(plfd.revents & POLLIN){  
 				//scade t1, si avvia t2 
-				if( set_timer_poll(&timerfd, &timerspec2, (leasetime * 7)/8 - (leasetime >> 1) , &plfd) == 1 ){
+				if( set_timer_poll(&timerfd, &timerspec2, (leasetime * 7)>>3 - (leasetime >> 1) , &plfd) == 1 ){
 					//Errori e uscita 
 				}
             	state = RENEW;	 
 			}
+		 	break;
         }
-        break;
         case RENEW:{
             //modifica il pacchetto per fare la richiesta al server in while fino al T2 non bloccante
             
-			//leggi l' addr del dhcp server
+			//leggi l' addr del dhcp server e il client addr
 			time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
 			ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_SERVER, _read_dhcp_serverip, &timestamp);
-			// Ora in dhcp_server_add ci dovrebbe essere l'ip 
-			
-			
-			
+			ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_clientip, &timestamp);
+			// Ora in dhcp_server_add ci dovrebbe essere l'ip e client_addr il client addr 
+			(void) config_flags;
+			int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+			struct sockaddr_ll sll = {
+				.sll_family = AF_PACKET,
+				.sll_protocol = htons(ETH_P_IP),
+				.sll_ifindex = ifindex,
+				.sll_halen = ETH_ALEN,
+				.sll_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+			};
+			//ioth_bind(packet_socket, (struct sockaddr *) &sll, sizeof(sll));
+			struct dhcpdata dhcpdata = {
+				.stack = stack,
+				.ifindex = ifindex,
+				.xid = {0, 0, 0, 0},
+				.fqdn = fqdn,
+				.timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP),
+				.serveraddr = dhcp_server_add,
+				.clientaddr = client_addr;
+			};
+			ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
 			int ret2;
 			while( (ret2 = poll(&plfd,1,0)) == 0){
-                if (risposta == success){
+                if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, dhcp_server_add) == 0){
                     state = BOUND;
                     break;
-                }else{
+                }elseif (errno == ECANCELED){ //received a NACK from server
                     //void current ip
                     state = INIT;
 					break; 
                 }
             }
-
+			ioth_close(packet_socket);
 			//Scade t2
 			if(plfd.revents & POLLIN){ 
-
-            	if(no_risposta)
-					state = REBIND;
+            	if(state == RENEW)
+				//carica il timer con  il rimanente lease time 1/8 del lease
+				if( set_timer_poll(&timerfd, &timerspec2, (leasetime )>>3 , &plfd) == 1 ){
+					//Errori e uscita 
+				}
+				state = REBIND;
 			}
-			
+			break;
 		}
-        break;
         case REBIND:{
-            //fino al lease time 
-            int ret2;
+
+			//leggi l' addr del dhcp server e il client addr
+			time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
+			ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_SERVER, _read_dhcp_serverip, &timestamp);
+			ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_clientip, &timestamp);
+			// Ora in dhcp_server_add ci dovrebbe essere l'ip e [globale] il client addr 
+			(void) config_flags;
+			int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+			struct sockaddr_ll sll = {
+				.sll_family = AF_PACKET,
+				.sll_protocol = htons(ETH_P_IP),
+				.sll_ifindex = ifindex,
+				.sll_halen = ETH_ALEN,
+				.sll_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+			};
+			//ioth_bind(packet_socket, (struct sockaddr *) &sll, sizeof(sll));
+			struct dhcpdata dhcpdata = {
+				.stack = stack,
+				.ifindex = ifindex,
+				.xid = {0, 0, 0, 0},
+				.fqdn = fqdn,
+				.timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP),
+				.clientaddr = client_addr;
+			};
+			ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
+			//fino al lease time 
+			int ret2;
 			while( (ret2 = poll(&plfd,1,0)) == 0){
-                //modifica il pacchetto per fare la richiesta ma in broadcast fino al lease_time
-                if (risposta){
-                    if (risposta == success){
-                        state = BOUND;
-                        break;
-                    }else{
-                        //void current ip
-                        state = INIT;
-                        break;
-                    }
-                }
-                if (no_risposta){
+                if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, BROADCASTADDR) == 0){
+                    state = BOUND;
+                    break;
+                }elseif (errno == ECANCELED){ //received a NACK from server
                     //void current ip
                     state = INIT;
+					break; 
                 }
             }
+			ioth_close(packet_socket);
+			//Scade t2
+			if(plfd.revents & POLLIN){ 
+            	if(state != BOUND){
+				//void current ip
+				state = INIT;
+				}
+			}
+			break;
         }
         default:
         break;
@@ -614,6 +673,6 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 		
     }
 	close(timerfd);
-
+	
     
 }
