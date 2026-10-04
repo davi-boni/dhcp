@@ -358,8 +358,9 @@ static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, s
 			fclose(optf);
 			if (answ_type == DHCPNAK)
 				return errno = ECANCELED, -1;
-			if (answ_type == type && answ_server) {
-				memcpy(&data->serveraddr, answ_server, sizeof(data->serveraddr));
+			if (answ_type == type /* && answ_server */) {
+				if (answ_server)
+					memcpy(&data->serveraddr, answ_server, sizeof(data->serveraddr));
 				memcpy(&data->clientaddr, inbuf.bootp_h.yiaddr, sizeof(data->clientaddr));
 				if (answ_type == DHCPOFFER)
 					return dhcp_send(DHCPREQUEST, fd, dest_addr, data);
