@@ -471,10 +471,6 @@ static pthread_mutex_t client_addr_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t addr_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t leasetime_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-pthread_mutex_lock(&ioth_confdata_mutex);
-pthread_mutex_unlock(&ioth_confdata_mutex);
-
-
 in_addr_t tmp_dhcp_server_add, tmp_client_addr;   
 uint32_t tmp_leasetime;    
 
