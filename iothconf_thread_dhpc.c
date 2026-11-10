@@ -620,7 +620,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 	struct itimerspec timerspec1, timerspec2; 
 	struct pollfd plfd;   
 	
-	in_addr_t dhcp_server_add, client_addr;   
+	struct in_addr dhcp_server_add, client_addr;   
 	uint32_t leasetime;  
 	
 	while (state != UNBOUND){
