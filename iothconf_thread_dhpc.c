@@ -539,7 +539,7 @@ static int _read_dhcp_serverip(void *data, void *arg) {
 	struct in_addr *s_addr =  data;
 	time_t timestamp = ioth_confdata_gettimestamp(data);
 	if (timestamp >= *latest_timestamp) {
-		tmp_dhcp_server_add = *s_addr;
+		tmp_dhcp_server_add = s_addr;
 	}
 	return 0;
 }
@@ -559,7 +559,7 @@ static int _read_clientip(void *data, void *arg){
 	struct ioth_confdata_ipaddr *addr = data; 
 	time_t timestamp = ioth_confdata_gettimestamp(data);
 	if(timestamp >= *latest_timestamp) {
-		tmp_client_addr = *addr;
+		tmp_client_addr = addr->addr;
 	}
 	return 0;
 }
@@ -691,7 +691,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 			ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
 			int ret2;
 			while( (ret2 = poll(&plfd,1,0)) == 0){
-                if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, dhcp_server_add) == 0){
+                if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, dhcp_server_add.s_addr) == 0){
                     state = BOUND;
                     break;
                 }else if (errno == ECANCELED){ //received a NACK from server
