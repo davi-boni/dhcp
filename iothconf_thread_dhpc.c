@@ -470,7 +470,7 @@ struct dhcp_thread_args {
     time_t timestamp;
     int state;
 };
-int iothconf_dhcp(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags);
+int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, time_t timestamp, int state){
 void *dhcp_pthread_runner(void *arg) {
     struct dhcp_thread_args *args = (struct dhcp_thread_args *)arg;
 
@@ -528,7 +528,7 @@ static pthread_mutex_t client_addr_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t addr_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t leasetime_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-in_addr_t tmp_dhcp_server_add, tmp_client_addr;   
+struct in_addr tmp_dhcp_server_add, tmp_client_addr;   
 uint32_t tmp_leasetime;    
 
 
