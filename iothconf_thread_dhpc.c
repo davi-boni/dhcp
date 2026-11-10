@@ -220,7 +220,7 @@ static int dhcp_send(int type, int fd, const struct sockaddr_ll *dest_addr, stru
 		.ip_h.ihl = 5,
 		.ip_h.ttl = 64,
 		.ip_h.protocol = SOL_UDP, //UDP
-		.ip_h.daddr = daddr //0xffffffff,
+		.ip_h.daddr = daddr, //0xffffffff,
 		.udp_h.uh_sport = htons(DHCP_CLIENTPORT),
 		.udp_h.uh_dport = htons(DHCP_SERVERPORT),
 		.bootp_h.op = 1, // boot req
@@ -456,9 +456,41 @@ static int iothconf_dhcp_proto(struct ioth *stack, unsigned int ifindex, const c
 	return rv;
 }
 // da modificare per creare e gestire il thread
+
+struct dhcp_thread{
+	int thread_id;
+};
+
+struct dhcp_thread_args {
+    struct ioth *stack;
+    unsigned int ifindex;
+    const char *fqdn;
+    uint32_t config_flags;
+    time_t timestamp;
+    int state;
+};
+
+void *dhcp_pthread_runner(void *arg) {
+    struct dhcp_thread_args *args = (struct dhcp_thread_args *)arg;
+
+    /* Execute the task */
+    int result = ioth_dhcp_thread(args->stack, 
+                                  args->ifindex, 
+                                  args->fqdn, 
+                                  args->config_flags, 
+                                  args->timestamp, 
+                                  args->state);
+
+    /* Free heap-allocated argument wrapper */
+    free(args);
+
+    /* Cast int return code to void* or return NULL */
+    return (void *)(intptr_t)result;
+}
+
 int iothconf_dhcp(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags) {
 	int dhcp_thread_id = 1;
-	time_t timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP)
+	time_t timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP);
 
 	ioth_confdata_add_data(stack, ifindex, IOTH_CONFDATA_DHCP4_THREAD, timestamp, 0,
 							struct dhcp_thread,
@@ -476,7 +508,7 @@ int iothconf_dhcp(struct ioth *stack, unsigned int ifindex, const char *fqdn, ui
     args->timestamp = timestamp;
     args->state = INIT; /* Explicit default (e.g., INIT) can be passed by caller */
 
-    int ret = pthread_create(thread_id, NULL, dhcp_pthread_runner, args);
+    int ret = pthread_create(dhcp_thread_id, NULL, dhcp_pthread_runner, args);
     if (ret != 0) {
         free(args);
         return ret;
@@ -485,18 +517,9 @@ int iothconf_dhcp(struct ioth *stack, unsigned int ifindex, const char *fqdn, ui
     return 0;
 }
 
-struct dhcp_thread{
-	int thread_id;
-};
 
-struct dhcp_thread_args {
-    struct ioth *stack;
-    unsigned int ifindex;
-    const char *fqdn;
-    uint32_t config_flags;
-    time_t timestamp;
-    int state;
-};
+
+
 
 
 static pthread_mutex_t server_add_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -515,7 +538,7 @@ static int _read_dhcp_serverip(void *data, void *arg) {
 	struct in_addr *s_addr =  data;
 	time_t timestamp = ioth_confdata_gettimestamp(data);
 	if (timestamp >= *latest_timestamp) {
-		tmp_dhcp_server_add = s_addr->s_addr;
+		tmp_dhcp_server_add = s_addr;
 	}
 	return 0;
 }
@@ -535,7 +558,7 @@ static int _read_clientip(void *data, void *arg){
 	struct ioth_confdata_ipaddr *addr = data; 
 	time_t timestamp = ioth_confdata_gettimestamp(data);
 	if(timestamp >= *latest_timestamp) {
-		tmp_client_addr = addr->addr;
+		tmp_client_addr = addr;
 	}
 	return 0;
 }
@@ -549,8 +572,8 @@ int set_timer_poll(int *timerfd, struct itimerspec *tspec, uint32_t leasetime, s
     tspec->it_interval.tv_nsec = 0; 
 
 	 
-	if(timerfd_settime(*timerfd, 0, tspec, NULL) == -1){
-		fprintf(stderr, "Errore nell'attivazione del timer (timerfd_settime)\n"); 
+	if(timer_settime(*timerfd, 0, tspec, NULL) == -1){
+		fprintf(stderr, "Errore nell'attivazione del timer (timer_settime)\n"); 
 		return 1;  
 	}
 	
@@ -581,30 +604,14 @@ int set_timer_poll(int *timerfd, struct itimerspec *tspec, uint32_t leasetime, s
 	pthread_mutex_unlock(&leasetime_mutex);\
 }											\
 
-void *dhcp_pthread_runner(void *arg) {
-    struct dhcp_thread_args *args = (struct dhcp_thread_args *)arg;
 
-    /* Execute the task */
-    int result = ioth_dhcp_thread(args->stack, 
-                                  args->ifindex, 
-                                  args->fqdn, 
-                                  args->config_flags, 
-                                  args->timestamp, 
-                                  args->state);
-
-    /* Free heap-allocated argument wrapper */
-    free(args);
-
-    /* Cast int return code to void* or return NULL */
-    return (void *)(intptr_t)result;
-}
 
 
 
 int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, time_t timestamp, int state){
-    int timerfd = timerfd_create(CLOCK_MONOTONIC, 0);
+    int timerfd = timer_create(CLOCK_MONOTONIC, 0);
 	if(timerfd == -1) {
-    	perror("timerfd_create");
+    	perror("timer_create");
     	return 1;
 	}
 	struct itimerspec timerspec1, timerspec2; 
@@ -666,7 +673,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 				.sll_protocol = htons(ETH_P_IP),
 				.sll_ifindex = ifindex,
 				.sll_halen = ETH_ALEN,
-				.sll_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+				.sll_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
 			};
 			//ioth_bind(packet_socket, (struct sockaddr *) &sll, sizeof(sll));
 			struct dhcpdata dhcpdata = {
@@ -676,7 +683,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 				.fqdn = fqdn,
 				.timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP),
 				.serveraddr = dhcp_server_add,
-				.clientaddr = client_addr;
+				.clientaddr = client_addr,
 			};
 			ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
 			int ret2;
@@ -684,7 +691,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
                 if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, dhcp_server_add) == 0){
                     state = BOUND;
                     break;
-                }elseif (errno == ECANCELED){ //received a NACK from server
+                }else if (errno == ECANCELED){ //received a NACK from server
                     //void current ip
                     state = INIT;
 					break; 
@@ -735,7 +742,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
                 if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, BROADCASTADDR) == 0){
                     state = BOUND;
                     break;
-                }elseif (errno == ECANCELED){ //received a NACK from server
+                }else if (errno == ECANCELED){ //received a NACK from server
                     //void current ip
                     state = INIT;
 					break; 
