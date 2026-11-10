@@ -431,7 +431,7 @@ static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, s
 	}
 }
 
-static int iothconf_dhcp_proto(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags) {
+static int iothconf_dhcp_proto(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, time_t timestamp) {
 	(void) config_flags;
 	int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
 	struct sockaddr_ll sll = {
@@ -447,7 +447,7 @@ static int iothconf_dhcp_proto(struct ioth *stack, unsigned int ifindex, const c
 		.ifindex = ifindex,
 		.xid = {0, 0, 0, 0},
 		.fqdn = fqdn,
-		.timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP)
+		.timestamp = timestamp
 	};
 	ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
 	//loop
@@ -455,15 +455,48 @@ static int iothconf_dhcp_proto(struct ioth *stack, unsigned int ifindex, const c
 	ioth_close(packet_socket);
 	return rv;
 }
-
+// da modificare per creare e gestire il thread
 int iothconf_dhcp(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags) {
-	int rv = iothconf_dhcp_proto(stack, ifindex, fqdn, config_flags);
-	if (rv == 0)
-		iothconf_ip_update(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, config_flags);
-	return rv;
+	int dhcp_thread_id = 1;
+	time_t timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP)
+
+	ioth_confdata_add_data(stack, ifindex, IOTH_CONFDATA_DHCP4_THREAD, timestamp, 0,
+							struct dhcp_thread,
+							.thread_id = dhcp_thread_id);
+	
+	struct dhcp_thread_args *args = malloc(sizeof(*args));
+    if (!args) {
+        return -1;
+    }
+
+    args->stack = stack;
+    args->ifindex = ifindex;
+    args->fqdn = fqdn;
+    args->config_flags = config_flags;
+    args->timestamp = timestamp;
+    args->state = INIT; /* Explicit default (e.g., INIT) can be passed by caller */
+
+    int ret = pthread_create(thread_id, NULL, dhcp_pthread_runner, args);
+    if (ret != 0) {
+        free(args);
+        return ret;
+    }
+
+    return 0;
 }
 
+struct dhcp_thread{
+	int thread_id;
+};
 
+struct dhcp_thread_args {
+    struct ioth *stack;
+    unsigned int ifindex;
+    const char *fqdn;
+    uint32_t config_flags;
+    time_t timestamp;
+    int state;
+};
 
 
 static pthread_mutex_t server_add_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -548,11 +581,27 @@ int set_timer_poll(int *timerfd, struct itimerspec *tspec, uint32_t leasetime, s
 	pthread_mutex_unlock(&leasetime_mutex);\
 }											\
 
+void *dhcp_pthread_runner(void *arg) {
+    struct dhcp_thread_args *args = (struct dhcp_thread_args *)arg;
+
+    /* Execute the task */
+    int result = ioth_dhcp_thread(args->stack, 
+                                  args->ifindex, 
+                                  args->fqdn, 
+                                  args->config_flags, 
+                                  args->timestamp, 
+                                  args->state);
+
+    /* Free heap-allocated argument wrapper */
+    free(args);
+
+    /* Cast int return code to void* or return NULL */
+    return (void *)(intptr_t)result;
+}
 
 
 
-
-int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, int state=INIT){
+int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, time_t timestamp, int state){
     int timerfd = timerfd_create(CLOCK_MONOTONIC, 0);
 	if(timerfd == -1) {
     	perror("timerfd_create");
@@ -568,7 +617,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 	  
        switch (state){
         case INIT:{
-            int rv = iothconf_dhcp_proto(stack, ifindex, fqdn, config_flags);
+            int rv = iothconf_dhcp_proto(stack, ifindex, fqdn, config_flags, timestamp);
             if (rv == 0){
                 state = BOUND;
             }else{
@@ -708,6 +757,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 		
     }
 	close(timerfd);
+	return UNBOUND;
 	
     
 }

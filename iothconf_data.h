@@ -42,6 +42,8 @@
 #define IOTH_CONFDATA_DHCP4_ROUTER     0x43 // struct in_addr (maybe more than one)
 #define IOTH_CONFDATA_DHCP4_DNS        0x48 // struct in_addr (maybe more than one)
 #define IOTH_CONFDATA_DHCP4_DOMAIN     0x4a // search list multistring (*).
+//custom
+#define IOTH_CONFDATA_DHCP4_THREAD	   0x4c // struct dhcp_thread
 
 #define IOTH_CONFDATA_DHCP6_TIMESTAMP  0x60 // no data
 #define IOTH_CONFDATA_DHCP6_SERVERID   0x61 // serverid option copied from the DHCPv6 msg

@@ -274,8 +274,10 @@ static int _ioth_config(struct ioth *stack, const char *config, int from_ioth_ne
 		if (clean_flags & IOTHCONF_RD)
 			iothconf_ip_clean(stack, ifindex, IOTH_CONFDATA_RD6_TIMESTAMP, 0);
 		if (clean_flags & IOTHCONF_DHCPV6)
-			iothconf_ip_clean(stack, ifindex, IOTH_CONFDATA_DHCP6_TIMESTAMP, 0);
+			//rimuovi se ce il thread	
+		iothconf_ip_clean(stack, ifindex, IOTH_CONFDATA_DHCP6_TIMESTAMP, 0);
 		if (clean_flags & IOTHCONF_DHCP)
+			//rimuovi se ce il thread
 			iothconf_ip_clean(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, 0);
 		if (clean_flags & IOTHCONF_ETH)
 			iothconf_cleaneth(stack, ifindex, 0);
@@ -286,9 +288,11 @@ static int _ioth_config(struct ioth *stack, const char *config, int from_ioth_ne
 			if (iothconf_rd(stack, ifindex, fqdn, config_flags) == 0)
 				retvalue |= IOTHCONF_RD;
 		if (config_flags & IOTHCONF_DHCPV6)
+			//crea un thread per il dhcp
 			if (iothconf_dhcpv6(stack, ifindex, fqdn, config_flags) == 0)
 				retvalue |= IOTHCONF_DHCPV6;
 		if (config_flags & IOTHCONF_DHCP)
+			//crea un thread per il dhcp
 			if (iothconf_dhcp(stack, ifindex, fqdn, config_flags) == 0)
 				retvalue |= IOTHCONF_DHCP;
 		if (config_flags & IOTHCONF_STATIC)
