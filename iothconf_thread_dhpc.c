@@ -33,7 +33,7 @@
 #include <iothconf.h>
 #include <iothconf_mod.h>
 #include <iothconf_hash.h>
-#include <iothconf_data.h>
+#include "iothconf_data.h"
 #include <pthread.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
@@ -261,7 +261,7 @@ static int dhcp_send(int type, int fd, const struct sockaddr_ll *dest_addr, stru
 	sum = chksum(sum, &outbuf.ip_h, sizeof(outbuf.ip_h));
 	outbuf.ip_h.check = htons(~sum);
 	/* try 3 times */
-	printf("Sending from client with type %d\n", type);
+	printf("Send with type: %u \n", type); 
 	int times = 0;
 	for (;;) {
 		if (ioth_sendto(fd, &outbuf, DHCPPKT + optlen, 0, (struct sockaddr *) dest_addr, sizeof(*dest_addr)) < 0)
@@ -335,7 +335,7 @@ static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, s
 			return errno = ETIME, -1;
 		size_t inbuflen = ioth_recvfrom(fd, &inbuf, sizeof(inbuf), 0, NULL, NULL);
 		//printf("%zd \n", inbuflen);
-		if (true){//check_consistency(inbuf, inbuflen, data)) {
+		if(1){//check_consistency(inbuf, inbuflen, data)) {
 			FILE *optf = fmemopen(&inbuf.options, MAXOPT, "r");
 			uint8_t answ_type = 0;
 			uint8_t *answ_server = NULL;
@@ -371,7 +371,6 @@ static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, s
 				fseek(optf, next_opt, SEEK_SET);
 			}
 			fclose(optf);
-			printf("Received from server with type %d\n", answ_type);
 			if (answ_type == DHCPNAK)
 				return errno = ECANCELED, -1;
 			if (answ_type == type && answ_server) {
@@ -654,7 +653,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 	while (state != UNBOUND) {
 		switch (state) {
 			case INIT: {
-				printf("iothconf_dhcp_proto lanciato\n"); // DEBUG
+				printf("Enter INIT \n"); 
 				int rv = iothconf_dhcp_proto(stack, ifindex, fqdn, config_flags, timestamp);
 				if (rv == 0) {
 					state = BOUND;
@@ -667,6 +666,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 			}
 
 			case BOUND: {
+				printf("Enter BOUND\n"); 
 				iothconf_ip_update(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, config_flags);
 				read_leasetime(stack, ifindex, timestamp, &leasetime);
 				printf("ottenuto leastime %d\n", leasetime);
@@ -686,7 +686,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 
 				if (plfd.revents & POLLIN) {
 					consume_timer(timerfd); // Consuma la scadenza di T1
-					printf("concluso T1");
+					printf("concluso T1\n");
 					// Scade T1, si avvia T2 per il tempo rimanente fino a 7/8 del lease:
 					// (7/8 leasetime) - (1/2 leasetime) = 3/8 leasetime
 					uint32_t t2_delta = ((leasetime * 7) >> 3) - (leasetime >> 1);
@@ -701,6 +701,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 			}
 
 			case RENEW: {
+				printf("Enter RENEW \n"); 
 				read_addr(stack, ifindex, timestamp, &dhcp_server_add, &client_addr);
 				(void)config_flags;
 				int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
@@ -754,6 +755,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 			}
 
 			case REBIND: {
+				printf("Enter REBIND \n");
 				read_addr(stack, ifindex, timestamp, &dhcp_server_add, &client_addr);
 				(void)config_flags;
 				int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
