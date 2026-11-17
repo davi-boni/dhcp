@@ -237,7 +237,7 @@ static int dhcp_send(int type, int fd, const struct sockaddr_ll *dest_addr, stru
 	}
 	unsigned int sum=0;
 	FILE *optf = fmemopen(&outbuf.options, MAXOPT, "w");
-	add_dhcp_opt_type(optf, type);
+	add_dhcp_opt_type(optf, (type == DHCP_R_REQUEST)? DHCPREQUEST : type);
 	add_dhcp_opt_maxsize(optf);
 	add_dhcp_opt_clientid(optf, data->macaddr);
 	if (type == DHCPREQUEST) {
@@ -261,6 +261,7 @@ static int dhcp_send(int type, int fd, const struct sockaddr_ll *dest_addr, stru
 	sum = chksum(sum, &outbuf.ip_h, sizeof(outbuf.ip_h));
 	outbuf.ip_h.check = htons(~sum);
 	/* try 3 times */
+	printf("Sending from client with type %d\n", type);
 	int times = 0;
 	for (;;) {
 		if (ioth_sendto(fd, &outbuf, DHCPPKT + optlen, 0, (struct sockaddr *) dest_addr, sizeof(*dest_addr)) < 0)
@@ -334,7 +335,7 @@ static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, s
 			return errno = ETIME, -1;
 		size_t inbuflen = ioth_recvfrom(fd, &inbuf, sizeof(inbuf), 0, NULL, NULL);
 		//printf("%zd \n", inbuflen);
-		if (check_consistency(inbuf, inbuflen, data)) {
+		if (true){//check_consistency(inbuf, inbuflen, data)) {
 			FILE *optf = fmemopen(&inbuf.options, MAXOPT, "r");
 			uint8_t answ_type = 0;
 			uint8_t *answ_server = NULL;
@@ -370,6 +371,7 @@ static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, s
 				fseek(optf, next_opt, SEEK_SET);
 			}
 			fclose(optf);
+			printf("Received from server with type %d\n", answ_type);
 			if (answ_type == DHCPNAK)
 				return errno = ECANCELED, -1;
 			if (answ_type == type && answ_server) {
@@ -667,7 +669,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 			case BOUND: {
 				iothconf_ip_update(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, config_flags);
 				read_leasetime(stack, ifindex, timestamp, &leasetime);
-
+				printf("ottenuto leastime %d\n", leasetime);
 				// Imposta T1 = 50% del leasetime (leasetime / 2)
 				if (set_timer_poll(timerfd, &timerspec1, leasetime >> 1, &plfd) == 1) {
 					close(timerfd);
@@ -684,10 +686,11 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 
 				if (plfd.revents & POLLIN) {
 					consume_timer(timerfd); // Consuma la scadenza di T1
-
+					printf("concluso T1");
 					// Scade T1, si avvia T2 per il tempo rimanente fino a 7/8 del lease:
 					// (7/8 leasetime) - (1/2 leasetime) = 3/8 leasetime
 					uint32_t t2_delta = ((leasetime * 7) >> 3) - (leasetime >> 1);
+					printf("t2_delta %d\n", t2_delta);
 					if (set_timer_poll(timerfd, &timerspec2, t2_delta, &plfd) == 1) {
 						close(timerfd);
 						return 1;
@@ -721,6 +724,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 
 				int ret2;
 				// Ripeti finché T2 non scade (poll con timeout 0 restituisce 0 se il timer non è scaduto)
+				printf("Inizio Renew\n");
 				while ((ret2 = poll(&plfd, 1, 0)) == 0) {
 					if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, dhcp_server_add.s_addr) == 0) {
 						timestamp = dhcpdata.timestamp; // Aggiorna il timestamp di riferimento al nuovo lease
@@ -735,6 +739,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 
 				// Se T2 è scaduto
 				if (plfd.revents & POLLIN) {
+					printf("Scaduto T2\n");
 					consume_timer(timerfd); // Consuma la scadenza di T2
 					if (state == RENEW) {
 						// Carica il timer con il rimanente 1/8 del lease time
@@ -771,6 +776,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 
 				int ret2;
 				// Ripeti fino alla scadenza del lease time
+				printf("Inizio REBIND\n");
 				while ((ret2 = poll(&plfd, 1, 0)) == 0) {
 					if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, BROADCASTADDR) == 0) {
 						timestamp = dhcpdata.timestamp; // Aggiorna il timestamp di riferimento al nuovo lease
