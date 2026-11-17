@@ -14,7 +14,7 @@
 #include <stdarg.h>
 #include <ioth.h>
 #include <iothconf.h>
-#include "iothconf_dhcp_thread.c"
+#include "iothconf_thread_dhcp.c"
 
 uint8_t serveraddr[4] = {0xb,0x0, 0x0,0xa};		//11.0.0.10;				//indirizzo server statico 
 const char *fqdn = "host.v2.cs.unibo.it";	
@@ -22,35 +22,6 @@ unsigned int ifindex = 2;
 struct ioth *serverstack = NULL;	//inizializzato dopo 
 uint8_t chaddr[16] = {0x00}; 		//indirizzo client (per ora uno)
 
-//Momentanea
-static int check_consistency2(struct dhcp_pkt inbuf, size_t inbuflen, struct dhcpdata *data) {  
-	uint8_t init_xid[4] = {0, 0, 0, 0}; 
-	unsigned int sum=0;
-	static uint8_t dhcp_cookie[] = DHCP_COOKIE;
-	if (inbuflen < DHCPPKT){	
-		printf("Size errata\n"); 
-		return 0;
-	}
-	sum = chksum(sum, &inbuf.ip_h, sizeof(inbuf.ip_h));
-	printf("inbuf: %hhu e data->xid %hhu", inbuf.bootp_h.xid, data->xid);  	//DEBUG
-	if (sum != 0xffff){
-		return 0;
-	}
-	if (inbuf.ip_h.protocol != SOL_UDP)		
-		return 0;
-	if (inbuf.udp_h.uh_sport != htons(DHCP_CLIENTPORT))  	
- 		return 0;
-	if (inbuf.udp_h.uh_dport != htons(DHCP_SERVERPORT))   	
-		return 0;
-	/*if (memcmp(inbuf.bootp_h.xid, data->xid, sizeof(data->xid))){			//Add fix SISTEMARE! 
-		return 0;
-	}  */		//problema con xid perchè cambia tutte le volte, il client lo rigenera ad ogni send 
-	if (memcmp(inbuf. dhcp_h.dhcp_cookie, dhcp_cookie, sizeof(dhcp_cookie)))
-		return 0;
-	if (inbuf.bootp_h.op != 1)			//li aspetta da un client 
-		return 0;
-	return 1;		
-}
 
 static int dhcp_get_prova(int sendtype, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data);
 static int dhcp_server_send(int type, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data){  
@@ -155,12 +126,8 @@ static int dhcp_get_print(int sendtype, int fd, const struct sockaddr_ll *dest_a
         		printf("PACCHETTO RICEVUTO! Dimensione: %zd byte\n", inbuflen);
     			//break;
     	}
-		//Pacchetto ricevuto fin qui, a questo punto va controllato se è quello atteso  
-		if (!check_consistency2(inbuf, inbuflen, data)) {
-			printf("consistency non va bene!\n");
-		        break; 	
-	 	}
-		//Se il pacchetto ricevuto è corretto, il server invia il successivo 
+		
+		//Invio pacchetto successivo 
 		switch(sendtype){
 			case DHCPDISCOVER: type = DHCPOFFER; break;			 
 			case DHCPREQUEST: type = DHCPACK; break;
@@ -279,11 +246,7 @@ static int dhcp_get_prova(int sendtype, int fd, const struct sockaddr_ll *dest_a
         		printf("PACCHETTO RICEVUTO! Dimensione: %zd byte\n", inbuflen);
     			//break;
     	}
-		//Pacchetto ricevuto fin qui, a questo punto va controllato se è quello atteso  
-		if (!check_consistency2(inbuf, inbuflen, data)) {
-			printf("consistency non va bene!\n");
-		        break; 	
-	 	}
+		
 		//Se il pacchetto ricevuto è corretto, il server invia il successivo 
 		switch(sendtype){
 			case DHCPDISCOVER: type = DHCPOFFER; break;			 
