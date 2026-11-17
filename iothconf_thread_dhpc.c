@@ -36,6 +36,7 @@
 #include <iothconf_data.h>
 #include <pthread.h>
 #include <sys/timerfd.h>
+#include <unistd.h>
 
 struct dhcpdata {
 	struct ioth *stack;
@@ -568,26 +569,30 @@ static int _read_clientip(void *data, void *arg){
 	return 0;
 }
 
-int set_timer_poll(int *timerfd, struct itimerspec *tspec, uint32_t leasetime, struct pollfd *plfd){
-	
-	//E' intero senza segno il leasetime, non ci sono problemi su campo nsec
-	tspec->it_value.tv_sec = leasetime;		   
-    tspec->it_value.tv_nsec = 0; 
-	tspec->it_interval.tv_sec = 0; 
-    tspec->it_interval.tv_nsec = 0; 
+int set_timer_poll(int timerfd, struct itimerspec *tspec, uint32_t sec, struct pollfd *plfd) {
+	// Se sec == 0, timerfd_settime disarmerebbe il timer anziché farlo scadere subito;
+	// impostiamo almeno 1 nanosecondo se sec == 0, oppure assicuriamoci che sec > 0.
+	tspec->it_value.tv_sec = sec;
+	tspec->it_value.tv_nsec = (sec == 0) ? 1 : 0;
+	tspec->it_interval.tv_sec = 0;
+	tspec->it_interval.tv_nsec = 0;
 
-	/* 
-	if(timerfd_settime(*timerfd, 0, tspec, NULL) == -1){
-		fprintf(stderr, "Errore nell'attivazione del timer (timer_settime)\n"); 
-		return 1;  
+	if (timerfd_settime(timerfd, 0, tspec, NULL) == -1) {
+		perror("Errore nell'attivazione del timer (timerfd_settime)");
+		return 1;
 	}
-		*/
-	
-	plfd->fd = *timerfd;            
-    plfd->events = POLLIN;  
 
-	return 0; 
+	plfd->fd = timerfd;
+	plfd->events = POLLIN;
+	plfd->revents = 0;
 
+	return 0;
+}
+
+static void consume_timer(int timerfd) {
+	uint64_t exp;
+	ssize_t s = read(timerfd, &exp, sizeof(uint64_t));
+	(void)s;
 }
 
 
@@ -613,186 +618,185 @@ int set_timer_poll(int *timerfd, struct itimerspec *tspec, uint32_t leasetime, s
 
 */
 
-void read_addr(struct ioth *stack, unsigned int ifindex, time_t timestamp, struct in_addr dhcp_server_add, struct in_addr client_addr){
-	pthread_mutex_lock(&addr_mutex);		
+void read_addr(struct ioth *stack, unsigned int ifindex, time_t timestamp, struct in_addr *dhcp_server_add, struct in_addr *client_addr) {
+	pthread_mutex_lock(&addr_mutex);
 	ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_SERVER, _read_dhcp_serverip, &timestamp);
 	ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_clientip, &timestamp);
-	dhcp_server_add = tmp_dhcp_server_add;
-	client_addr = tmp_client_addr;
+	*dhcp_server_add = tmp_dhcp_server_add;
+	*client_addr = tmp_client_addr;
 	pthread_mutex_unlock(&addr_mutex);
 }
 
-void read_leasetime(struct ioth *stack, unsigned int ifindex, time_t timestamp, uint32_t leasetime){
-	pthread_mutex_lock(&leasetime_mutex);		
+void read_leasetime(struct ioth *stack, unsigned int ifindex, time_t timestamp, uint32_t *leasetime) {
+	pthread_mutex_lock(&leasetime_mutex);
 	ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_ip_leasetime, &timestamp);
-	leasetime = tmp_leasetime;
+	*leasetime = tmp_leasetime;
 	pthread_mutex_unlock(&leasetime_mutex);
 }
 
 
 
-int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, time_t timestamp, int state){
-	printf("ioth_dhcp_thread dentro \n"); 	//DEBUG 
+int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, time_t timestamp, int state) {
+	printf("ioth_dhcp_thread dentro \n"); // DEBUG
 	int timerfd = timerfd_create(CLOCK_MONOTONIC, 0);
-	if(timerfd == -1) {
-    	perror("timer_create");
-    	return 1;
+	if (timerfd == -1) {
+		perror("timerfd_create");
+		return 1;
 	}
-	struct itimerspec timerspec1, timerspec2; 
-	struct pollfd plfd;   
-	
-	struct in_addr dhcp_server_add, client_addr;   
-	uint32_t leasetime;  
-	
-	while (state != UNBOUND){
-	  
-       switch (state){
-        case INIT:{
-			printf("iothconf_dhcp_proto lanciato\n");		//DEBUG
-            int rv = iothconf_dhcp_proto(stack, ifindex, fqdn, config_flags, timestamp);
-            if (rv == 0){
-                state = BOUND;
-				printf("BOUND raggiunto \n");		//DEBUG
+	struct itimerspec timerspec1, timerspec2;
+	struct pollfd plfd;
 
-            }else{
-                state = UNBOUND;
-				printf("UNBOUND raggiunto \n");		//DEBUG
-            }
-			break;
-        }
-        case BOUND:{
-			iothconf_ip_update(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, config_flags);
-			read_leasetime(stack, ifindex, timestamp, leasetime);
-			//time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
-			//ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_ip_leasetime, &timestamp);
+	struct in_addr dhcp_server_add, client_addr;
+	uint32_t leasetime = 0;
 
-			if( set_timer_poll(&timerfd, &timerspec1, leasetime >> 1, &plfd) == 1 ){
-					//Errori e uscita 
-			}
-            //aspetta il timer t1 bloccante
-			int ret1 = poll(&plfd, 1, -1); 
-			if(ret1 == -1){
-				fprintf(stderr, "Errore nella poll\n");
-				return 1;
-			}
-
-			if(plfd.revents & POLLIN){  
-				//scade t1, si avvia t2 
-				if( set_timer_poll(&timerfd, &timerspec2, (leasetime * 7)>>3 - (leasetime >> 1) , &plfd) == 1 ){
-					//Errori e uscita 
+	while (state != UNBOUND) {
+		switch (state) {
+			case INIT: {
+				printf("iothconf_dhcp_proto lanciato\n"); // DEBUG
+				int rv = iothconf_dhcp_proto(stack, ifindex, fqdn, config_flags, timestamp);
+				if (rv == 0) {
+					state = BOUND;
+					printf("BOUND raggiunto \n"); // DEBUG
+				} else {
+					state = UNBOUND;
+					printf("UNBOUND raggiunto \n"); // DEBUG
 				}
-            	state = RENEW;	 
+				break;
 			}
-		 	break;
-        }
-        case RENEW:{
-            //modifica il pacchetto per fare la richiesta al server in while fino al T2 non bloccante
-            
-			//leggi l' addr del dhcp server e il client addr
-			read_addr(stack, ifindex, timestamp, dhcp_server_add, client_addr);
-			//time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
-			//ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_SERVER, _read_dhcp_serverip, &timestamp);
-			//ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_clientip, &timestamp);
-			// Ora in dhcp_server_add ci dovrebbe essere l'ip e client_addr il client addr 
-			(void) config_flags;
-			int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
-			struct sockaddr_ll sll = {
-				.sll_family = AF_PACKET,
-				.sll_protocol = htons(ETH_P_IP),
-				.sll_ifindex = ifindex,
-				.sll_halen = ETH_ALEN,
-				.sll_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
-			};
-			//ioth_bind(packet_socket, (struct sockaddr *) &sll, sizeof(sll));
-			struct dhcpdata dhcpdata = {
-				.stack = stack,
-				.ifindex = ifindex,
-				.xid = {0, 0, 0, 0},
-				.fqdn = fqdn,
-				.timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP),
-				.serveraddr = dhcp_server_add,
-				.clientaddr = client_addr,
-			};
-			ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
-			int ret2;
-			while( (ret2 = poll(&plfd,1,0)) == 0){
-                if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, dhcp_server_add.s_addr) == 0){
-                    state = BOUND;
-                    break;
-                }else if (errno == ECANCELED){ //received a NACK from server
-                    //void current ip
-                    state = INIT;
-					break; 
-                }
-            }
-			ioth_close(packet_socket);
-			//Scade t2
-			if(plfd.revents & POLLIN){ 
-            	if(state == RENEW)
-				//carica il timer con  il rimanente lease time 1/8 del lease
-				if( set_timer_poll(&timerfd, &timerspec2, (leasetime )>>3 , &plfd) == 1 ){
-					//Errori e uscita 
+
+			case BOUND: {
+				iothconf_ip_update(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, config_flags);
+				read_leasetime(stack, ifindex, timestamp, &leasetime);
+
+				// Imposta T1 = 50% del leasetime (leasetime / 2)
+				if (set_timer_poll(timerfd, &timerspec1, leasetime >> 1, &plfd) == 1) {
+					close(timerfd);
+					return 1;
 				}
-				state = REBIND;
+
+				// Aspetta il timer T1 in modo bloccante
+				int ret1 = poll(&plfd, 1, -1);
+				if (ret1 == -1) {
+					perror("Errore nella poll");
+					close(timerfd);
+					return 1;
+				}
+
+				if (plfd.revents & POLLIN) {
+					consume_timer(timerfd); // Consuma la scadenza di T1
+
+					// Scade T1, si avvia T2 per il tempo rimanente fino a 7/8 del lease:
+					// (7/8 leasetime) - (1/2 leasetime) = 3/8 leasetime
+					uint32_t t2_delta = ((leasetime * 7) >> 3) - (leasetime >> 1);
+					if (set_timer_poll(timerfd, &timerspec2, t2_delta, &plfd) == 1) {
+						close(timerfd);
+						return 1;
+					}
+					state = RENEW;
+				}
+				break;
 			}
-			break;
+
+			case RENEW: {
+				read_addr(stack, ifindex, timestamp, &dhcp_server_add, &client_addr);
+				(void)config_flags;
+				int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+				struct sockaddr_ll sll = {
+					.sll_family = AF_PACKET,
+					.sll_protocol = htons(ETH_P_IP),
+					.sll_ifindex = ifindex,
+					.sll_halen = ETH_ALEN,
+					.sll_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+				};
+				struct dhcpdata dhcpdata = {
+					.stack = stack,
+					.ifindex = ifindex,
+					.xid = {0, 0, 0, 0},
+					.fqdn = fqdn,
+					.timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP),
+					.serveraddr = dhcp_server_add,
+					.clientaddr = client_addr,
+				};
+				ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
+
+				int ret2;
+				// Ripeti finché T2 non scade (poll con timeout 0 restituisce 0 se il timer non è scaduto)
+				while ((ret2 = poll(&plfd, 1, 0)) == 0) {
+					if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, dhcp_server_add.s_addr) == 0) {
+						timestamp = dhcpdata.timestamp; // Aggiorna il timestamp di riferimento al nuovo lease
+						state = BOUND;
+						break;
+					} else if (errno == ECANCELED) { // Ricevuto NACK dal server
+						state = INIT;
+						break;
+					}
+				}
+				ioth_close(packet_socket);
+
+				// Se T2 è scaduto
+				if (plfd.revents & POLLIN) {
+					consume_timer(timerfd); // Consuma la scadenza di T2
+					if (state == RENEW) {
+						// Carica il timer con il rimanente 1/8 del lease time
+						if (set_timer_poll(timerfd, &timerspec2, leasetime >> 3, &plfd) == 1) {
+							close(timerfd);
+							return 1;
+						}
+						state = REBIND;
+					}
+				}
+				break;
+			}
+
+			case REBIND: {
+				read_addr(stack, ifindex, timestamp, &dhcp_server_add, &client_addr);
+				(void)config_flags;
+				int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+				struct sockaddr_ll sll = {
+					.sll_family = AF_PACKET,
+					.sll_protocol = htons(ETH_P_IP),
+					.sll_ifindex = ifindex,
+					.sll_halen = ETH_ALEN,
+					.sll_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+				};
+				struct dhcpdata dhcpdata = {
+					.stack = stack,
+					.ifindex = ifindex,
+					.xid = {0, 0, 0, 0},
+					.fqdn = fqdn,
+					.timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP),
+					.clientaddr = client_addr
+				};
+				ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
+
+				int ret2;
+				// Ripeti fino alla scadenza del lease time
+				while ((ret2 = poll(&plfd, 1, 0)) == 0) {
+					if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, BROADCASTADDR) == 0) {
+						timestamp = dhcpdata.timestamp; // Aggiorna il timestamp di riferimento al nuovo lease
+						state = BOUND;
+						break;
+					} else if (errno == ECANCELED) { // Ricevuto NACK dal server
+						state = INIT;
+						break;
+					}
+				}
+				ioth_close(packet_socket);
+
+				// Scade il lease time finale
+				if (plfd.revents & POLLIN) {
+					consume_timer(timerfd); // Consuma la scadenza finale
+					if (state != BOUND) {
+						state = INIT;
+					}
+				}
+				break;
+			}
+
+			default:
+				break;
 		}
-        case REBIND:{
-
-			//leggi l' addr del dhcp server e il client addr
-			read_addr(stack, ifindex, timestamp, dhcp_server_add, client_addr);
-			//time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
-			//ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_SERVER, _read_dhcp_serverip, &timestamp);
-			//ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_clientip, &timestamp);
-			// Ora in dhcp_server_add ci dovrebbe essere l'ip e [globale] il client addr 
-			(void) config_flags;
-			int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
-			struct sockaddr_ll sll = {
-				.sll_family = AF_PACKET,
-				.sll_protocol = htons(ETH_P_IP),
-				.sll_ifindex = ifindex,
-				.sll_halen = ETH_ALEN,
-				.sll_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-			};
-			//ioth_bind(packet_socket, (struct sockaddr *) &sll, sizeof(sll));
-			struct dhcpdata dhcpdata = {
-				.stack = stack,
-				.ifindex = ifindex,
-				.xid = {0, 0, 0, 0},
-				.fqdn = fqdn,
-				.timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP),
-				.clientaddr = client_addr
-			};
-			ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
-			//fino al lease time 
-			int ret2;
-			while( (ret2 = poll(&plfd,1,0)) == 0){
-                if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, BROADCASTADDR) == 0){
-                    state = BOUND;
-                    break;
-                }else if (errno == ECANCELED){ //received a NACK from server
-                    //void current ip
-                    state = INIT;
-					break; 
-                }
-            }
-			ioth_close(packet_socket);
-			//Scade t2
-			if(plfd.revents & POLLIN){ 
-            	if(state != BOUND){
-				//void current ip
-				state = INIT;
-				}
-			}
-			break;
-        }
-        default:
-        break;
-        }
-		
-    }
+	}
 	close(timerfd);
 	return UNBOUND;
-	
-    
 }
