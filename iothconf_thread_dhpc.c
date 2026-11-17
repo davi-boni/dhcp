@@ -35,6 +35,7 @@
 #include <iothconf_hash.h>
 #include <iothconf_data.h>
 #include <pthread.h>
+#include <sys/timerfd.h>
 
 struct dhcpdata {
 	struct ioth *stack;
@@ -213,8 +214,8 @@ static int dhcp_send(int type, int fd, const struct sockaddr_ll *dest_addr, stru
 		default:
 			return errno = EINVAL, -1;
 	}
-	if (getrandom(data->xid, sizeof(data->xid), 0) < 0)
-		return -1;
+		if (getrandom(data->xid, sizeof(data->xid), 0) < 0 )
+			return -1;
 	struct dhcp_pkt outbuf = {
 		.ip_h.version = 4,
 		.ip_h.ihl = 5,
@@ -304,7 +305,7 @@ static uint8_t mask2prefix(uint32_t mask) {
 	return 32 - i;
 }
 
-#define DHCP_TIMEOUT 2000
+#define DHCP_TIMEOUT 10000 	//2000
 static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data) {
 	int type;
 	switch (sendtype) {
@@ -470,7 +471,7 @@ struct dhcp_thread_args {
     time_t timestamp;
     int state;
 };
-int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, time_t timestamp, int state){
+int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, time_t timestamp, int state);
 void *dhcp_pthread_runner(void *arg) {
     struct dhcp_thread_args *args = (struct dhcp_thread_args *)arg;
 
@@ -515,6 +516,9 @@ int iothconf_dhcp(struct ioth *stack, unsigned int ifindex, const char *fqdn, ui
         return ret;
     }
 
+	//Waiting for thread termination 
+	pthread_join(dhcp_thread_id, NULL);
+
     return 0;
 }
 
@@ -539,7 +543,7 @@ static int _read_dhcp_serverip(void *data, void *arg) {
 	struct in_addr *s_addr =  data;
 	time_t timestamp = ioth_confdata_gettimestamp(data);
 	if (timestamp >= *latest_timestamp) {
-		tmp_dhcp_server_add = s_addr;
+		tmp_dhcp_server_add = *s_addr;
 	}
 	return 0;
 }
@@ -572,11 +576,12 @@ int set_timer_poll(int *timerfd, struct itimerspec *tspec, uint32_t leasetime, s
 	tspec->it_interval.tv_sec = 0; 
     tspec->it_interval.tv_nsec = 0; 
 
-	 
-	if(timer_settime(timerfd, 0, tspec, NULL) == -1){
+	/* 
+	if(timerfd_settime(*timerfd, 0, tspec, NULL) == -1){
 		fprintf(stderr, "Errore nell'attivazione del timer (timer_settime)\n"); 
 		return 1;  
 	}
+		*/
 	
 	plfd->fd = *timerfd;            
     plfd->events = POLLIN;  
@@ -586,6 +591,7 @@ int set_timer_poll(int *timerfd, struct itimerspec *tspec, uint32_t leasetime, s
 }
 
 
+/*
 #define read_addr(server_addr, client_addr)	\
 {											\
 	pthread_mutex_lock(&addr_mutex);		\
@@ -605,14 +611,29 @@ int set_timer_poll(int *timerfd, struct itimerspec *tspec, uint32_t leasetime, s
 	pthread_mutex_unlock(&leasetime_mutex);\
 }											\
 
+*/
 
+void read_addr(struct ioth *stack, unsigned int ifindex, time_t timestamp, struct in_addr dhcp_server_add, struct in_addr client_addr){
+	pthread_mutex_lock(&addr_mutex);		
+	ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_SERVER, _read_dhcp_serverip, &timestamp);
+	ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_clientip, &timestamp);
+	dhcp_server_add = tmp_dhcp_server_add;
+	client_addr = tmp_client_addr;
+	pthread_mutex_unlock(&addr_mutex);
+}
+
+void read_leasetime(struct ioth *stack, unsigned int ifindex, time_t timestamp, uint32_t leasetime){
+	pthread_mutex_lock(&leasetime_mutex);		
+	ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_ip_leasetime, &timestamp);
+	leasetime = tmp_leasetime;
+	pthread_mutex_unlock(&leasetime_mutex);
+}
 
 
 
 int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, time_t timestamp, int state){
-    timer_t timer_id;
-	
-	int timerfd = timer_create(CLOCK_MONOTONIC, 0, &timer_id);
+	printf("ioth_dhcp_thread dentro \n"); 	//DEBUG 
+	int timerfd = timerfd_create(CLOCK_MONOTONIC, 0);
 	if(timerfd == -1) {
     	perror("timer_create");
     	return 1;
@@ -627,17 +648,21 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 	  
        switch (state){
         case INIT:{
+			printf("iothconf_dhcp_proto lanciato\n");		//DEBUG
             int rv = iothconf_dhcp_proto(stack, ifindex, fqdn, config_flags, timestamp);
             if (rv == 0){
                 state = BOUND;
+				printf("BOUND raggiunto \n");		//DEBUG
+
             }else{
                 state = UNBOUND;
+				printf("UNBOUND raggiunto \n");		//DEBUG
             }
 			break;
         }
         case BOUND:{
 			iothconf_ip_update(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, config_flags);
-			read_leasetime(leasetime);
+			read_leasetime(stack, ifindex, timestamp, leasetime);
 			//time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
 			//ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_ip_leasetime, &timestamp);
 
@@ -664,7 +689,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
             //modifica il pacchetto per fare la richiesta al server in while fino al T2 non bloccante
             
 			//leggi l' addr del dhcp server e il client addr
-			read_addr(dhcp_server_add,client_addr);
+			read_addr(stack, ifindex, timestamp, dhcp_server_add, client_addr);
 			//time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
 			//ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_SERVER, _read_dhcp_serverip, &timestamp);
 			//ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_clientip, &timestamp);
@@ -715,7 +740,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
         case REBIND:{
 
 			//leggi l' addr del dhcp server e il client addr
-			read_addr(dhcp_server_add,client_addr);
+			read_addr(stack, ifindex, timestamp, dhcp_server_add, client_addr);
 			//time_t timestamp = ioth_confdata_read_timestamp(stack, ifindex, type);
 			//ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_SERVER, _read_dhcp_serverip, &timestamp);
 			//ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_DHCP4_ADDR, _read_clientip, &timestamp);
