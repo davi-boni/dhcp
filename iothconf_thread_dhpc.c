@@ -262,6 +262,14 @@ static int dhcp_send(int type, int fd, const struct sockaddr_ll *dest_addr, stru
 	outbuf.ip_h.check = htons(~sum);
 	/* try 3 times */
 	printf("Send with type: %u \n", type); 
+	uint32_t xid_val;
+	memcpy(&xid_val, data->xid, sizeof(xid_val));
+	printf("xid in data: 0x%08x\n", ntohl(xid_val));
+	uint32_t xid_val2;
+	memcpy(&xid_val2, outbuf.bootp_h.xid, sizeof(xid_val2));
+	printf("xid in outbuf: 0x%08x\n", ntohl(xid_val2));
+
+	
 	int times = 0;
 	for (;;) {
 		if (ioth_sendto(fd, &outbuf, DHCPPKT + optlen, 0, (struct sockaddr *) dest_addr, sizeof(*dest_addr)) < 0)
@@ -278,23 +286,46 @@ static int dhcp_send(int type, int fd, const struct sockaddr_ll *dest_addr, stru
 static int check_consistency(struct dhcp_pkt inbuf, size_t inbuflen, struct dhcpdata *data) {
 	unsigned int sum=0;
 	static uint8_t dhcp_cookie[] = DHCP_COOKIE;
-	if (inbuflen < DHCPPKT)
+	if (inbuflen < DHCPPKT){
+		printf("Pacchetto troppo corto %d rispetto %d",inbuflen,DHCPPKT);
 		return 0;
+	}
 	sum = chksum(sum, &inbuf.ip_h, sizeof(inbuf.ip_h));
-	if (sum != 0xffff)
+	if (sum != 0xffff){
+		printf("Chesksum sbagliato %x\n",sum);
 		return 0;
-	if (inbuf.ip_h.protocol != SOL_UDP)
+	}
+	if (inbuf.ip_h.protocol != SOL_UDP){
+		printf("protocollo sbagliato %d\n",inbuf.ip_h.protocol);
 		return 0;
-	if (inbuf.udp_h.uh_sport != htons(DHCP_SERVERPORT))
+	}
+	if (inbuf.udp_h.uh_sport != htons(DHCP_SERVERPORT)){
+		printf("porta server sbagliata %d\n",inbuf.udp_h.uh_sport);
 		return 0;
-	if (inbuf.udp_h.uh_dport != htons(DHCP_CLIENTPORT))
+	}
+	if (inbuf.udp_h.uh_dport != htons(DHCP_CLIENTPORT)){
+		printf("porta client sbagliata %d\n",inbuf.udp_h.uh_dport);
 		return 0;
-	if (memcmp(inbuf.bootp_h.xid, data->xid, sizeof(data->xid)))
+	}
+	uint32_t xid_val;
+	memcpy(&xid_val, inbuf.bootp_h.xid, sizeof(xid_val));
+	printf("Ricevuto xid: 0x%08x\n", ntohl(xid_val));
+
+
+	if (memcmp(inbuf.bootp_h.xid, data->xid, sizeof(data->xid))){
+		uint32_t xid_val;
+		memcpy(&xid_val, inbuf.bootp_h.xid, sizeof(xid_val));
+		printf("Ricevuto xid: 0x%08x\n", ntohl(xid_val));
 		return 0;
-	if (memcmp(inbuf. dhcp_h.dhcp_cookie, dhcp_cookie, sizeof(dhcp_cookie)))
+	}
+	if (memcmp(inbuf.dhcp_h.dhcp_cookie, dhcp_cookie, sizeof(dhcp_cookie))){
+		printf("cookie sbagliati in %d e expected %d \n",inbuf.dhcp_h.dhcp_cookie,dhcp_cookie);
 		return 0;
-	if (inbuf.bootp_h.op != 2) //boot reply
+	}
+	if (inbuf.bootp_h.op != 2){ //boot reply
+		printf("op sbagliato %d diverso da 2\n",inbuf.bootp_h.op);
 		return 0;
+	}
 	return 1;
 }
 
@@ -327,6 +358,9 @@ static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, s
 		 when the expected reply msg has been received and processed OR
 		 when the timeout expires */
 	for(;;) {
+		uint32_t xid_val;
+		memcpy(&xid_val, data->xid, sizeof(xid_val));
+		printf("Ascolto con xid: 0x%08x\n", ntohl(xid_val));
 		int event;
 		gettimeofday(&start, NULL);
 		event = poll(pfd, 1, timeout);
@@ -335,7 +369,7 @@ static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, s
 			return errno = ETIME, -1;
 		size_t inbuflen = ioth_recvfrom(fd, &inbuf, sizeof(inbuf), 0, NULL, NULL);
 		//printf("%zd \n", inbuflen);
-		if(1){//check_consistency(inbuf, inbuflen, data)) {
+		if(check_consistency(inbuf, inbuflen, data)) {
 			FILE *optf = fmemopen(&inbuf.options, MAXOPT, "r");
 			uint8_t answ_type = 0;
 			uint8_t *answ_server = NULL;
@@ -424,6 +458,8 @@ static int dhcp_get(int sendtype, int fd, const struct sockaddr_ll *dest_addr, s
 				} else
 					return errno = EFAULT, -1;
 			}
+		}else{ //debug
+			printf("CHECK FALLITO SUL PACCHETTO\n");
 		}
 		/* the code reaches this poinnt only if a spurious pakcet has beeen received.
 			 it loops waiting for more packets using the remaining time to the timeout */

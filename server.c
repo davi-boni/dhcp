@@ -14,7 +14,7 @@
 #include <stdarg.h>
 #include <ioth.h>
 #include <iothconf.h>
-#include "iothconf_thread_dhcp.c"
+#include "iothconf_dhcp.c"
 
 uint8_t serveraddr[4] = {0xb,0x0, 0x0,0xa};		//11.0.0.10;				//indirizzo server statico 
 const char *fqdn = "host.v2.cs.unibo.it";	
@@ -22,8 +22,35 @@ unsigned int ifindex = 2;
 struct ioth *serverstack = NULL;	//inizializzato dopo 
 uint8_t chaddr[16] = {0x00}; 		//indirizzo client (per ora uno)
 
+//Momentanea
+static int check_consistency2(struct dhcp_pkt inbuf, size_t inbuflen, struct dhcpdata *data) {  
+	uint8_t init_xid[4] = {0, 0, 0, 0}; 
+	unsigned int sum=0;
+	static uint8_t dhcp_cookie[] = DHCP_COOKIE;
+	if (inbuflen < DHCPPKT){	
+		return 0;
+	}
+	sum = chksum(sum, &inbuf.ip_h, sizeof(inbuf.ip_h));
+	if (sum != 0xffff){
+		return 0;
+	}
+	if (inbuf.ip_h.protocol != SOL_UDP)		
+		return 0;
+	if (inbuf.udp_h.uh_sport != htons(DHCP_CLIENTPORT))  	
+ 		return 0;
+	if (inbuf.udp_h.uh_dport != htons(DHCP_SERVERPORT))   	
+		return 0;
+	/*if (memcmp(inbuf.bootp_h.xid, data->xid, sizeof(data->xid))){			//Add fix SISTEMARE! 
+		return 0;
+	}  */		//problema con xid perchè cambia tutte le volte, il client lo rigenera ad ogni send 
+	if (memcmp(inbuf. dhcp_h.dhcp_cookie, dhcp_cookie, sizeof(dhcp_cookie)))
+		return 0;
+	if (inbuf.bootp_h.op != 1)			//li aspetta da un client 
+		return 0;
+	return 1;		
+}
 
-static int dhcp_get_prova(int sendtype, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data);
+static int dhcp_get_print(int sendtype, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data);
 static int dhcp_server_send(int type, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data){  
 	//Controlla che il type sia valido 
 	int get_type;  
@@ -97,7 +124,7 @@ static int dhcp_server_send(int type, int fd, const struct sockaddr_ll *dest_add
 	if (ioth_sendto(fd, &outbuf, DHCPPKT + optlen, 0, (struct sockaddr *) dest_addr, sizeof(*dest_addr)) < 0)
 		return -1;
 
-	if( dhcp_get_prova(get_type, fd, dest_addr, data) == 0)
+	if( dhcp_get_print(get_type, fd, dest_addr, data) == 0)
 		return 0; 
 }
 
@@ -126,8 +153,12 @@ static int dhcp_get_print(int sendtype, int fd, const struct sockaddr_ll *dest_a
         		printf("PACCHETTO RICEVUTO! Dimensione: %zd byte\n", inbuflen);
     			//break;
     	}
-		
-		//Invio pacchetto successivo 
+		//Pacchetto ricevuto fin qui, a questo punto va controllato se è quello atteso  
+		//if (!check_consistency2(inbuf, inbuflen, data)) {
+		//	printf("consistency non va bene!\n");
+		//        break; 	
+	 	//}
+		//Se il pacchetto ricevuto è corretto, il server invia il successivo 
 		switch(sendtype){
 			case DHCPDISCOVER: type = DHCPOFFER; break;			 
 			case DHCPREQUEST: type = DHCPACK; break;
@@ -147,9 +178,12 @@ static int dhcp_get_print(int sendtype, int fd, const struct sockaddr_ll *dest_a
 		if(sendtype == DHCPDISCOVER){
 			memcpy(chaddr, inbuf.bootp_h.chaddr, sizeof(chaddr)); 
 			//Cambiare xid prendendo quello del client 
-			memcpy(dhcpdatasrv.xid, inbuf.bootp_h.xid, sizeof(inbuf.bootp_h.xid));	
-			printf("inbuf: %hhu e data->xid %hhu", inbuf.bootp_h.xid, dhcpdatasrv.xid);  	//DEBUG
+			uint32_t xid_val;
+			memcpy(&xid_val, inbuf.bootp_h.xid, sizeof(xid_val));
+			printf("Ricevuto xid: 0x%08x\n", ntohl(xid_val));
+			printf("inbuf: %u e data->xid %u", inbuf.bootp_h.xid, dhcpdatasrv.xid);  	//DEBUG
 		}
+		memcpy(dhcpdatasrv.xid, inbuf.bootp_h.xid, sizeof(inbuf.bootp_h.xid));	
 		
 
 		//Lettura options pacchetto ricevuto 
@@ -200,12 +234,11 @@ static int dhcp_get_print(int sendtype, int fd, const struct sockaddr_ll *dest_a
 		}
 		fclose(optf);
 		printf("Invio server con type: %u \n", type); 
-	/*	if(dhcp_server_send(type, fd, dest_addr, &dhcpdatasrv) < 0){
+		if(dhcp_server_send(type, fd, dest_addr, &dhcpdatasrv) < 0){
 			printf("Errore send server\n"); 
 			perror(NULL); 
 			return -1;
 		}
-	*/
 	return 0; 
 		
 	}	 
@@ -220,123 +253,7 @@ static int dhcp_get_print(int sendtype, int fd, const struct sockaddr_ll *dest_a
 
 }
 
-
-//funzione originale 
-
-static int dhcp_get_prova(int sendtype, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data){
-	int type; 		//Per le risposte del server 
-	struct dhcp_pkt inbuf;
-	struct pollfd pfd[] = {{fd, POLLIN, 0}};
-	int timeout = DHCP_TIMEOUT;
-	struct timeval start;
-	struct timeval end;
-	struct timeval timediff;
-	/* this loop terminates:
-		 when the expected reply msg has been received and processed OR
-		 when the timeout expires */
-   	for (;;) {
-		int event = poll(pfd, 1, timeout);
-		if (event == 0) {
-			printf("Timeout scaduto: nessun pacchetto sul socket.\n");
-			return -1;
-		}
-		
-    	ssize_t inbuflen = ioth_recvfrom(fd, &inbuf, sizeof(inbuf), 0, NULL, NULL);
-		if (inbuflen > 0) {
-        		printf("PACCHETTO RICEVUTO! Dimensione: %zd byte\n", inbuflen);
-    			//break;
-    	}
-		
-		//Se il pacchetto ricevuto è corretto, il server invia il successivo 
-		switch(sendtype){
-			case DHCPDISCOVER: type = DHCPOFFER; break;			 
-			case DHCPREQUEST: type = DHCPACK; break;
-			case DHCP_R_REQUEST: type = DHCPACK; break;
-			default: return errno = EINVAL, -1; 
-		} 
-		//memorizzo l'indirizzo mac identificativo del client di cui ho ricevuto la discover 
-		//dhcp data struct 	
-		struct dhcpdata dhcpdatasrv = {				//serverstack, ifinde,fqdn globali 
-			.stack = serverstack,
-			.ifindex = ifindex,			
-			.xid = {0,0,0,0},		//default, cambiato sotto 
-			.fqdn = fqdn,
-			.timestamp = ioth_confdata_new_timestamp(serverstack,ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP)
-		};
-		//Salvo il macaddr del client proveniente dal pacchetto DHCPDISCOVER
-		if(sendtype == DHCPDISCOVER){
-			memcpy(chaddr, inbuf.bootp_h.chaddr, sizeof(chaddr)); 
-			//Cambiare xid prendendo quello del client 
-			memcpy(dhcpdatasrv.xid, inbuf.bootp_h.xid, sizeof(inbuf.bootp_h.xid));	
-			printf("inbuf: %hhu e data->xid %hhu", inbuf.bootp_h.xid, dhcpdatasrv.xid);  	//DEBUG
-		}
-		
-
-		//Lettura options pacchetto ricevuto 
-		FILE *optf = fmemopen(&inbuf.options, MAXOPT, "r");
-		uint8_t answ_type = 0;
-		uint8_t *answ_server = NULL;
-		uint8_t answ_prefix = 0;
-		uint32_t answ_leasetime = 0;
-		/* first scan */
-		for(;;) {
-			/*	int event;
-				gettimeofday(&start, NULL);
-				event = poll(pfd, 1, timeout);
-				//printf("event %d\n", event);
-				if (event == 0)
-					return errno = ETIME, -1;
-			*/ 
-			int opt_type = getc(optf);
-			printf("first scan -> opt_type: %d\n",opt_type);
-			if (opt_type == OPTION_PAD)
-				continue;
-			if (opt_type == EOF || opt_type == OPTION_END)
-				break;
-			unsigned int opt_len = getc(optf);
-			long next_opt = ftell(optf) + opt_len;
-			switch(opt_type) {
-				case OPTION_TYPE: answ_type = getc(optf); break;
-				case OPTION_SERVID: answ_server = inbuf.options + ftell(optf); break;
-				case OPTION_MASK:
-														answ_prefix = mask2prefix(
-																(getc(optf) << 24) |
-																(getc(optf) << 16) |
-																(getc(optf) << 8) |
-																getc(optf));
-														break;
-				case OPTION_LEASETIME:
-														answ_leasetime = (getc(optf) << 24) | (getc(optf) << 16) |
-															(getc(optf) << 8) | getc(optf);
-														break;
-
-
-			}
-			fseek(optf, next_opt, SEEK_SET);
-		}
-		fclose(optf);
-		printf("answ_type client: %u e type: %u \n", answ_type, type);
-		printf("Invio server con type: %u \n", type); 
-		if(dhcp_server_send(type, fd, dest_addr, &dhcpdatasrv) < 0){
-			printf("Errore send server\n"); 
-			perror(NULL); 
-			return -1;
-		}
-		return 0; 
-		
-	}	 
-
-	
-	/* the code reaches this poinnt only if a spurious pakcet has beeen received.
-	it loops waiting for more packets using the remaining time to the timeout */
-	gettimeofday(&end, NULL);
-	timersub(&end, &start, &timediff);
-	timeout -= timediff.tv_sec * 1000 + timediff.tv_usec / 1000;
-		if (timeout < 0) timeout = 0; 
-
-}
-
-	
+			
 
 
 static int iothconf_dhcp_proto2(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags) {
@@ -360,9 +277,10 @@ static int iothconf_dhcp_proto2(struct ioth *stack, unsigned int ifindex, const 
 	ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
 	//loop
 	int rv; 
-	rv = dhcp_get_prova(DHCPDISCOVER, packet_socket, &sll, &dhcpdata);
+	rv = dhcp_get_print(DHCPDISCOVER, packet_socket, &sll, &dhcpdata);
 	while(1){
-		rv = dhcp_get_prova(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata);
+		printf("\n ----------------------------- \n "); 
+		rv = dhcp_get_print(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata);
 	}
 	ioth_close(packet_socket);
 	return rv;
@@ -409,6 +327,4 @@ int main(){
     } 
 
     return 0; 
-}		
-
-
+}	
