@@ -554,14 +554,30 @@ int iothconf_dhcp(struct ioth *stack, unsigned int ifindex, const char *fqdn, ui
         return ret;
     }
 
-	//Waiting for thread termination 
+	sleep(240);
+	pthread_cancel(dhcp_thread_id);
+	printf("Segnale di Kill lanciato\n"); 
 	pthread_join(dhcp_thread_id, NULL);
 
     return 0;
 }
 
 
+//Cleanup for ioth packet sockets 
+void ioth_close_clean(void* arg){
+	int fd = (int)(intptr_t) arg; 
+    ioth_close(fd);
+}
 
+//Cleanup for generic file descriptors 
+void fd_close_clean(void * arg){
+	int fd = (int)(intptr_t) arg; 
+	close(fd); 
+} 
+
+void test_clean(void * arg){
+	printf("MI SONO FERMATO E SONO NEL CLEANUP\n");
+}
 
 
 
@@ -686,6 +702,12 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 	struct in_addr dhcp_server_add, client_addr;
 	uint32_t leasetime = 0;
 
+	int packet_socket = 0;
+
+	pthread_cleanup_push(test_clean, NULL);
+	pthread_cleanup_push(fd_close_clean, &timerfd);
+	pthread_cleanup_push(ioth_close_clean,&packet_socket);
+
 	while (state != UNBOUND) {
 		switch (state) {
 			case INIT: {
@@ -704,14 +726,16 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 			case BOUND: {
 				printf("Enter BOUND\n"); 
 				iothconf_ip_update(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, config_flags);
+				pthread_testcancel();
 				read_leasetime(stack, ifindex, timestamp, &leasetime);
 				printf("ottenuto leastime %d\n", leasetime);
+				
 				// Imposta T1 = 50% del leasetime (leasetime / 2)
 				if (set_timer_poll(timerfd, &timerspec1, leasetime >> 1, &plfd) == 1) {
 					close(timerfd);
 					return 1;
 				}
-
+				pthread_testcancel();
 				// Aspetta il timer T1 in modo bloccante
 				int ret1 = poll(&plfd, 1, -1);
 				if (ret1 == -1) {
@@ -737,10 +761,11 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 			}
 
 			case RENEW: {
+				pthread_testcancel();
 				printf("Enter RENEW \n"); 
 				read_addr(stack, ifindex, timestamp, &dhcp_server_add, &client_addr);
 				(void)config_flags;
-				int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+				packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
 				struct sockaddr_ll sll = {
 					.sll_family = AF_PACKET,
 					.sll_protocol = htons(ETH_P_IP),
@@ -763,6 +788,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 				// Ripeti finché T2 non scade (poll con timeout 0 restituisce 0 se il timer non è scaduto)
 				printf("Inizio Renew\n");
 				while ((ret2 = poll(&plfd, 1, 0)) == 0) {
+					pthread_testcancel();
 					if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, dhcp_server_add.s_addr) == 0) {
 						timestamp = dhcpdata.timestamp; // Aggiorna il timestamp di riferimento al nuovo lease
 						state = BOUND;
@@ -791,10 +817,11 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 			}
 
 			case REBIND: {
+				pthread_testcancel();
 				printf("Enter REBIND \n");
 				read_addr(stack, ifindex, timestamp, &dhcp_server_add, &client_addr);
 				(void)config_flags;
-				int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+				packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
 				struct sockaddr_ll sll = {
 					.sll_family = AF_PACKET,
 					.sll_protocol = htons(ETH_P_IP),
@@ -816,6 +843,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 				// Ripeti fino alla scadenza del lease time
 				printf("Inizio REBIND\n");
 				while ((ret2 = poll(&plfd, 1, 0)) == 0) {
+					pthread_testcancel();
 					if (dhcp_send(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata, BROADCASTADDR) == 0) {
 						timestamp = dhcpdata.timestamp; // Aggiorna il timestamp di riferimento al nuovo lease
 						state = BOUND;
@@ -841,6 +869,12 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 				break;
 		}
 	}
+
+	pthread_cleanup_pop(0);
+	pthread_cleanup_pop(0);
+	pthread_cleanup_pop(0);
+
+
 	close(timerfd);
 	return UNBOUND;
 }
