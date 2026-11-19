@@ -16,90 +16,86 @@
 #include <iothconf.h>
 #include "iothconf_dhcp.c"
 
-uint8_t serveraddr[4] = {0xb,0x0, 0x0,0xa};		//11.0.0.10;				//indirizzo server statico 
+
+#define DHCP_R_REQUEST 9 
+#define BROADCASTADDR 0xffffffff
+
+uint8_t serveraddr[4] = {0xb,0x0, 0x0,0xa};		//11.0.0.10; indirizzo server statico 
 const char *fqdn = "host.v2.cs.unibo.it";	
 unsigned int ifindex = 2;
-struct ioth *serverstack = NULL;	//inizializzato dopo 
-uint8_t chaddr[16] = {0x00}; 		//indirizzo client (per ora uno)
+struct ioth *serverstack = NULL;	
+uint8_t chaddr[16] = {0x00}; 		
 
-//Momentanea
-static int check_consistency2(struct dhcp_pkt inbuf, size_t inbuflen, struct dhcpdata *data) {  
-	uint8_t init_xid[4] = {0, 0, 0, 0}; 
+static int check_pkt(struct dhcp_pkt inbuf, size_t inbuflen, struct dhcpdata *data) {
 	unsigned int sum=0;
 	static uint8_t dhcp_cookie[] = DHCP_COOKIE;
-	if (inbuflen < DHCPPKT){	
-		return 0;
+	if( inbuflen < DHCPPKT){
+		printf("pacchetto troppo piccolo: %lu \n", inbuflen); 
+		return 0; 
 	}
 	sum = chksum(sum, &inbuf.ip_h, sizeof(inbuf.ip_h));
 	if (sum != 0xffff){
+		printf("Chesksum sbagliato %x\n",sum);
 		return 0;
 	}
-	if (inbuf.ip_h.protocol != SOL_UDP)		
+	if (inbuf.ip_h.protocol != SOL_UDP){
+		printf("protocollo sbagliato %d\n",inbuf.ip_h.protocol);
 		return 0;
-	if (inbuf.udp_h.uh_sport != htons(DHCP_CLIENTPORT))  	
- 		return 0;
-	if (inbuf.udp_h.uh_dport != htons(DHCP_SERVERPORT))   	
+	}
+	if (inbuf.udp_h.uh_sport != htons(DHCP_CLIENTPORT)){
+		printf("porta server sbagliata %d\n",inbuf.udp_h.uh_sport);
 		return 0;
-	/*if (memcmp(inbuf.bootp_h.xid, data->xid, sizeof(data->xid))){			//Add fix SISTEMARE! 
+	}
+	if (inbuf.udp_h.uh_dport != htons(DHCP_SERVERPORT)){
+		printf("porta client sbagliata %d\n",inbuf.udp_h.uh_dport);
 		return 0;
-	}  */		//problema con xid perchè cambia tutte le volte, il client lo rigenera ad ogni send 
-	if (memcmp(inbuf. dhcp_h.dhcp_cookie, dhcp_cookie, sizeof(dhcp_cookie)))
+	}
+	if (memcmp(inbuf.dhcp_h.dhcp_cookie, dhcp_cookie, sizeof(dhcp_cookie))){
+		printf("cookie sbagliati in %d e expected %d \n",inbuf.dhcp_h.dhcp_cookie,dhcp_cookie);
 		return 0;
-	if (inbuf.bootp_h.op != 1)			//li aspetta da un client 
+	}
+	if (inbuf.bootp_h.op != 1){ 
+		printf("op sbagliato %d diverso da 1\n",inbuf.bootp_h.op);
 		return 0;
-	return 1;		
+	}
+	return 1;
 }
 
-static int dhcp_get_print(int sendtype, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data);
-static int dhcp_server_send(int type, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data){  
-	//Controlla che il type sia valido 
-	int get_type;  
-	switch(type){
-		case DHCPOFFER: 	//risponde al DHCPDISCOVER inviato da un client 
-			get_type = DHCPREQUEST;
-		break; 
-		case DHCPACK:		//risponde al DHCPREQUEST inviato da client 
-		break; 
-		default: 
-			return errno = EINVAL, -1;    
-	}
 
-	//Server costruisce il pacchetto di risposta da inviare 
+static int dhcp_get_srv(int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data);
+static int dhcp_server_send(int type, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data){  
+	
+
 	struct dhcp_pkt outbuf = {
 		.ip_h.version = 4,
 		.ip_h.ihl = 5,
 		.ip_h.ttl = 64,
-		.ip_h.protocol = SOL_UDP, //UDP
+		.ip_h.protocol = SOL_UDP, 
 		.ip_h.daddr = BROADCASTADDR,
 		.udp_h.uh_sport = htons(DHCP_SERVERPORT),	
-		.udp_h.uh_dport = htons(DHCP_CLIENTPORT),		//perchè vede i messaggi del client, hanno la porta di destinazione del server 
-		.bootp_h.op = 2, // boot reply
-		.bootp_h.htype = 1, // ethernet
+		.udp_h.uh_dport = htons(DHCP_CLIENTPORT),		 
+		.bootp_h.op = 2, 
+		.bootp_h.htype = 1, 
 		.bootp_h.hlen = ETH_ALEN,
 		.dhcp_h.dhcp_cookie = DHCP_COOKIE};	
 	memcpy(outbuf.bootp_h.xid, data->xid, sizeof(data->xid));
-	// in data->macaddr c'è indirizzo mac server
-	//Indirizzo IP del client che sceglie il server nella offer potrebbe essere randomico, qui lo mettiamo a mano 
-	//in_addr_t clientaddr = htonl((11u << 24) | (0u << 16) | (0u << 8) | 14u); 	
-	uint8_t clientaddr[4] = {0xb,0x0, 0x0,0xe};	 	//indirizzo 11.0.0.14
+	 	
+	uint8_t clientaddr[4] = {0xb,0x0, 0x0,0xe};	 					//indirizzo 11.0.0.14
 	memcpy(outbuf.bootp_h.yiaddr, clientaddr, sizeof(clientaddr)); 
 	memcpy(&data->clientaddr, clientaddr, sizeof(clientaddr)); 
-	memcpy(outbuf.bootp_h.siaddr, serveraddr, sizeof(serveraddr)); 	//Il client non lo legge, ma standard lo richiede 
-	memcpy(&data->serveraddr, serveraddr, sizeof(serveraddr));		//aggiunta io visto che la riga precedente il client non la usa   
-	//Per DHCPOFFER, oltre all'indirizzo disponibile nel campo yiaddr, vanno inseriti nelle option gli altri parametri di configurazione 
+	memcpy(outbuf.bootp_h.siaddr, serveraddr, sizeof(serveraddr)); 	 
+	memcpy(&data->serveraddr, serveraddr, sizeof(serveraddr));		  
+	 
 	FILE *optf = fmemopen(&outbuf.options, MAXOPT, "w");
-	add_dhcp_opt_type(optf, type);			//viene scritta nell'option 53 il tipo di pacchetto dhcp che viene inviato 
+	add_dhcp_opt_type(optf, type);			 
 	add_dhcp_opt_maxsize(optf);
-	//controllo se chaddr non è nullo
-	add_dhcp_opt_clientid(optf, chaddr);		//questo è il macaddr del client 
-	if (type != DHCPDISCOVER) {					//cattura DHCPOFFER e DHCPACK 
-		//Qui bisogna capire come si inserisce, data qua fa riferimento al server 
-		//add_dhcp_opt(optf, OPTION_REQIP, sizeof(data->clientaddr), &data->clientaddr);	questa il server non deve farla
+	add_dhcp_opt_clientid(optf, chaddr);		 
+	if (type != DHCPDISCOVER){	
 		add_dhcp_opt(optf, OPTION_SERVID, sizeof(data->serveraddr), &data->serveraddr);
-		//Aggiungo il leasetime e la maschera di rete 
+		 
 		uint32_t lease_seconds = 120; 	
 		uint32_t netmask = htonl((255 << 24) | (255 << 16) | (255 << 8) | 0);  
-		uint32_t leasetime = htonl(lease_seconds);		//host to network long 
+		uint32_t leasetime = htonl(lease_seconds);		 
 		add_dhcp_opt(optf, OPTION_LEASETIME, sizeof(leasetime), &leasetime); 
 		add_dhcp_opt(optf, OPTION_MASK, sizeof(netmask), &netmask); 
 	}
@@ -124,14 +120,14 @@ static int dhcp_server_send(int type, int fd, const struct sockaddr_ll *dest_add
 	if (ioth_sendto(fd, &outbuf, DHCPPKT + optlen, 0, (struct sockaddr *) dest_addr, sizeof(*dest_addr)) < 0)
 		return -1;
 
-	if( dhcp_get_print(get_type, fd, dest_addr, data) == 0)
-		return 0; 
+	//if( dhcp_get_srv(fd, dest_addr, data) == 0)
+	//	return 0; 
 }
 
 
 
-static int dhcp_get_print(int sendtype, int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data){
-	int type; 		//Per le risposte del server 
+static int dhcp_get_srv(int fd, const struct sockaddr_ll *dest_addr, struct dhcpdata *data){
+	int type; 		
 	struct dhcp_pkt inbuf;
 	struct pollfd pfd[] = {{fd, POLLIN, 0}};
 	int timeout = DHCP_TIMEOUT;
@@ -149,58 +145,20 @@ static int dhcp_get_print(int sendtype, int fd, const struct sockaddr_ll *dest_a
 		}
 		
     	ssize_t inbuflen = ioth_recvfrom(fd, &inbuf, sizeof(inbuf), 0, NULL, NULL);
-		if (inbuflen > 0) {
-        		printf("PACCHETTO RICEVUTO! Dimensione: %zd byte\n", inbuflen);
-    			//break;
-    	}
-		//Pacchetto ricevuto fin qui, a questo punto va controllato se è quello atteso  
-		//if (!check_consistency2(inbuf, inbuflen, data)) {
-		//	printf("consistency non va bene!\n");
-		//        break; 	
-	 	//}
-		//Se il pacchetto ricevuto è corretto, il server invia il successivo 
-		switch(sendtype){
-			case DHCPDISCOVER: type = DHCPOFFER; break;			 
-			case DHCPREQUEST: type = DHCPACK; break;
-			case DHCP_R_REQUEST: type = DHCPACK; break;
-			default: return errno = EINVAL, -1; 
-		} 
-		//memorizzo l'indirizzo mac identificativo del client di cui ho ricevuto la discover 
-		//dhcp data struct 	
-		struct dhcpdata dhcpdatasrv = {				//serverstack, ifinde,fqdn globali 
-			.stack = serverstack,
-			.ifindex = ifindex,			
-			.xid = {0,0,0,0},		//default, cambiato sotto 
-			.fqdn = fqdn,
-			.timestamp = ioth_confdata_new_timestamp(serverstack,ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP)
-		};
-		//Salvo il macaddr del client proveniente dal pacchetto DHCPDISCOVER
-		if(sendtype == DHCPDISCOVER){
-			memcpy(chaddr, inbuf.bootp_h.chaddr, sizeof(chaddr)); 
-			//Cambiare xid prendendo quello del client 
-			uint32_t xid_val;
-			memcpy(&xid_val, inbuf.bootp_h.xid, sizeof(xid_val));
-			printf("Ricevuto xid: 0x%08x\n", ntohl(xid_val));
-			printf("inbuf: %u e data->xid %u", inbuf.bootp_h.xid, dhcpdatasrv.xid);  	//DEBUG
-		}
-		memcpy(dhcpdatasrv.xid, inbuf.bootp_h.xid, sizeof(inbuf.bootp_h.xid));	
-		
 
-		//Lettura options pacchetto ricevuto 
+		if(!check_pkt(inbuf, inbuflen, data)){
+			printf("pacchetto scartato \n"); 
+			return -1; 
+		}
+
 		FILE *optf = fmemopen(&inbuf.options, MAXOPT, "r");
 		uint8_t answ_type = 0;
 		uint8_t *answ_server = NULL;
 		uint8_t answ_prefix = 0;
 		uint32_t answ_leasetime = 0;
+ 
 		/* first scan */
 		for(;;) {
-			/*	int event;
-				gettimeofday(&start, NULL);
-				event = poll(pfd, 1, timeout);
-				//printf("event %d\n", event);
-				if (event == 0)
-					return errno = ETIME, -1;
-			*/ 
 			int opt_type = getc(optf);
 			printf("first scan -> opt_type: %d\n",opt_type);
 			if (opt_type == OPTION_PAD)
@@ -233,6 +191,28 @@ static int dhcp_get_print(int sendtype, int fd, const struct sockaddr_ll *dest_a
 			fseek(optf, next_opt, SEEK_SET);
 		}
 		fclose(optf);
+
+ 
+		switch(answ_type){
+			case DHCPDISCOVER: type = DHCPOFFER; break;			 
+			case DHCPREQUEST: type = DHCPACK; break;
+			case DHCP_R_REQUEST: type = DHCPACK; break;
+			default: return errno = EINVAL, -1; 
+		}  
+		
+			
+		struct dhcpdata dhcpdatasrv = { 
+			.stack = serverstack,
+			.ifindex = ifindex,			
+			.xid = {0,0,0,0},		
+			.fqdn = fqdn,
+			.timestamp = ioth_confdata_new_timestamp(serverstack,ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP)
+		};
+	
+		memcpy(chaddr, inbuf.bootp_h.chaddr, sizeof(chaddr)); 
+		memcpy(dhcpdatasrv.xid, inbuf.bootp_h.xid, sizeof(inbuf.bootp_h.xid));	
+
+
 		printf("Invio server con type: %u \n", type); 
 		if(dhcp_server_send(type, fd, dest_addr, &dhcpdatasrv) < 0){
 			printf("Errore send server\n"); 
@@ -256,13 +236,13 @@ static int dhcp_get_print(int sendtype, int fd, const struct sockaddr_ll *dest_a
 			
 
 
-static int iothconf_dhcp_proto2(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags) {
+static int iothconf_dhcp_proto_srv(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags) {
 	(void) config_flags;
 	int packet_socket = ioth_msocket(stack, AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));		
-	struct sockaddr_ll sll = {			//Descrittore di indirizzo a livello 2, si usa con AF_PACKET
-		.sll_family = AF_PACKET,  //Indica pacchetti a livello 2 fisico 
+	struct sockaddr_ll sll = {			
+		.sll_family = AF_PACKET,   
 		.sll_protocol = htons(ETH_P_IP),
-		.sll_ifindex = ifindex,	  //Indice dell'interfaccia che manda pacchetto 
+		.sll_ifindex = ifindex,	  
 		.sll_halen = ETH_ALEN,
 		.sll_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 	};
@@ -276,11 +256,12 @@ static int iothconf_dhcp_proto2(struct ioth *stack, unsigned int ifindex, const 
 	}; 
 	ioth_linkgetaddr(stack, ifindex, dhcpdata.macaddr);
 	//loop
-	int rv; 
-	rv = dhcp_get_print(DHCPDISCOVER, packet_socket, &sll, &dhcpdata);
-	while(1){
+	int rv;
+	int i = 0; 
+	while(i < 10000000){
+		rv = dhcp_get_srv(packet_socket, &sll, &dhcpdata);
 		printf("\n ----------------------------- \n "); 
-		rv = dhcp_get_print(DHCP_R_REQUEST, packet_socket, &sll, &dhcpdata);
+		i++; 
 	}
 	ioth_close(packet_socket);
 	return rv;
@@ -295,17 +276,17 @@ static int iothconf_dhcp_proto2(struct ioth *stack, unsigned int ifindex, const 
 int main(){
 
     const char *stack = "vdestack";         
-    const char *vnl = "vde:///tmp/mysw";                             //tutorial                        
+    const char *vnl = "vde:///tmp/mysw";                                                    
     uint32_t config_flags = 0; 
 
-    serverstack = ioth_newstack(stack,vnl); 						//nuova var. globale
+    serverstack = ioth_newstack(stack,vnl); 						
      
     if(stack == NULL) {
 		perror("stack");
 		return 1;
     } 
 
-    int rv = ioth_config(serverstack, "ifindex=2,ip=11.0.0.10/24"); 	//CANCELLA a mano SE ESISTE GIA' 
+    int rv = ioth_config(serverstack, "ifindex=2,ip=11.0.0.10/24"); 	 
     if (rv < 0)
 	perror("ioth_config");
     else {
@@ -318,9 +299,9 @@ int main(){
 	printf("\n");
     } 
     
-    //Server configurato a questo punto
+    
     int rvproto; 
-    if( (rvproto = iothconf_dhcp_proto2(serverstack, ifindex, fqdn, config_flags)) == -1 ){
+    if( (rvproto = iothconf_dhcp_proto_srv(serverstack, ifindex, fqdn, config_flags)) == -1 ){
  	 	printf("Errore server: ");
 		perror(NULL); 	
 		return 1; 
@@ -328,3 +309,4 @@ int main(){
 
     return 0; 
 }	
+
