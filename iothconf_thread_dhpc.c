@@ -495,11 +495,21 @@ static int iothconf_dhcp_proto(struct ioth *stack, unsigned int ifindex, const c
 	return rv;
 }
 // da modificare per creare e gestire il thread
-#define IOTH_CONFDATA_DHCP4_THREAD 0x4c
+#define IOTH_CONFDATA_THREAD_TIMESTAMP 0x30 // struct dhcp_thread
+#define IOTH_CONFDATA_THREAD_DHCP4     0x31 // struct dhcp_thread
 
-struct dhcp_thread{
-	int thread_id;
+struct dhcp_thread_info{
+	pthread_t thread_id;
+	time_t timestamp;
+	int status;
+	int active;
 };
+
+struct dhcp_timed_status{
+	time_t timestamp;
+	int status;
+};
+
 
 struct dhcp_thread_args {
     struct ioth *stack;
@@ -509,6 +519,8 @@ struct dhcp_thread_args {
     time_t timestamp;
     int state;
 };
+
+
 int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags, time_t timestamp, int state);
 void *dhcp_pthread_runner(void *arg) {
     struct dhcp_thread_args *args = (struct dhcp_thread_args *)arg;
@@ -522,6 +534,7 @@ void *dhcp_pthread_runner(void *arg) {
                                   args->state);
 
     /* Free heap-allocated argument wrapper */
+	ioth_confdata_free(args->stack, args->ifindex, IOTH_CONFDATA_THREAD_DHCP4, args->timestamp); 
     free(args);
 
     /* Cast int return code to void* or return NULL */
@@ -529,12 +542,10 @@ void *dhcp_pthread_runner(void *arg) {
 }
 
 int iothconf_dhcp(struct ioth *stack, unsigned int ifindex, const char *fqdn, uint32_t config_flags) {
-	pthread_t dhcp_thread_id = 1;
-	time_t timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP);
+	pthread_t dhcp_thread_id = 0;
+	time_t timestamp = ioth_confdata_new_timestamp(stack, ifindex, IOTH_CONFDATA_THREAD_TIMESTAMP);
 
-	ioth_confdata_add_data(stack, ifindex, IOTH_CONFDATA_DHCP4_THREAD, timestamp, 0,
-							struct dhcp_thread,
-							.thread_id = dhcp_thread_id);
+	
 	
 	struct dhcp_thread_args *args = malloc(sizeof(*args));
     if (!args) {
@@ -553,25 +564,95 @@ int iothconf_dhcp(struct ioth *stack, unsigned int ifindex, const char *fqdn, ui
         free(args);
         return ret;
     }
-
-	sleep(240);
-	pthread_cancel(dhcp_thread_id);
-	printf("Segnale di Kill lanciato\n"); 
-	pthread_join(dhcp_thread_id, NULL);
+	printf("D_INFO creato id in dhcp %ld\n",dhcp_thread_id);
+	ioth_confdata_add_data(stack, ifindex, IOTH_CONFDATA_THREAD_DHCP4, timestamp, 0,
+							struct dhcp_thread_info,
+							.thread_id = dhcp_thread_id,
+							.timestamp = timestamp,
+							.status = UNBOUND,
+							.active = 1);
 
     return 0;
 }
 
+static int _set_thread_status(void *data, void *arg) {
+	struct dhcp_thread_info *thread_info = data;
+	struct dhcp_timed_status *dhcp_status = arg;
+	time_t timestamp = ioth_confdata_gettimestamp(data);
+	printf("CHECKING SET TIMESTAMPS\n");
+	if (timestamp >= dhcp_status->timestamp) {
+		thread_info->status = dhcp_status->status;
+		printf("Setting status to %d with actual value set %d\n", dhcp_status->status ,thread_info->status);
+	}
+	return 0;
+}
+
+static int _get_thread_info(void *data, void *arg) {
+	struct dhcp_thread_info *out_info = arg;
+	struct dhcp_thread_info *saved_info = data;
+	time_t timestamp = ioth_confdata_gettimestamp(data);
+	printf("CHECKING GET TIMESTAMPS\n");
+	if (timestamp >= out_info->timestamp) {
+		memcpy(out_info,saved_info, sizeof(struct dhcp_thread_info));
+		printf("Setting Info\n");
+	}
+	return 0;
+}
+
+int iothconf_dhcp_kill(struct ioth *stack, unsigned int ifindex){
+	time_t timestamp = 0;
+	timestamp = ioth_confdata_read_timestamp(stack,ifindex,IOTH_CONFDATA_THREAD_DHCP4);
+	struct dhcp_thread_info  d_i= {0,0,0,0};
+	d_i.timestamp = timestamp;
+	
+	ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_THREAD_DHCP4, _get_thread_info, &d_i);
+	printf("D_INFO  active in kill %d\n",d_i.active);
+	printf("D_INFO  status in kill %d\n",d_i.status);
+	if(!d_i.active) return 1;
+	
+	printf("D_INFO  id in kill %ld\n",d_i.thread_id);
+	pthread_cancel(d_i.thread_id);
+	printf("Segnale di Kill lanciato\n"); 
+	pthread_join(d_i.thread_id, NULL);
+	ioth_confdata_free(stack, ifindex, IOTH_CONFDATA_THREAD_DHCP4, timestamp); 
+	return 0;
+
+}
+
+int iothconf_dhcp_info(struct ioth *stack, unsigned int ifindex, int *status){
+	time_t timestamp = 0;
+	timestamp = ioth_confdata_read_timestamp(stack,ifindex,IOTH_CONFDATA_THREAD_DHCP4);
+	struct dhcp_thread_info  d_i= {0,0,0,0};
+	d_i.timestamp = timestamp;
+	
+	ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_THREAD_DHCP4, _get_thread_info, &d_i);
+	printf("D_INFO active in info %d\n",d_i.active);
+	printf("D_INFO status in info %d\n",d_i.status);
+	
+	if(!d_i.active) return -1;
+	
+	printf("Stato del Thread %d\n", d_i.status); 
+	*status = d_i.status;
+	return 0;
+
+}
+
+
+
 
 //Cleanup for ioth packet sockets 
 void ioth_close_clean(void* arg){
-	int fd = (int)(intptr_t) arg; 
+	printf("MI SONO FERMATO E SONO NEL CLEANUP ioth\n");
+	int fd = *(int *)arg;
+    if (fd >= 0)
     ioth_close(fd);
 }
 
 //Cleanup for generic file descriptors 
 void fd_close_clean(void * arg){
-	int fd = (int)(intptr_t) arg; 
+	printf("MI SONO FERMATO E SONO NEL CLEANUP fd\n");
+	int fd = *(int *)arg;
+    if (fd >= 0)
 	close(fd); 
 } 
 
@@ -580,9 +661,6 @@ void test_clean(void * arg){
 }
 
 
-
-static pthread_mutex_t server_add_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t client_addr_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t addr_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t leasetime_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -641,6 +719,18 @@ int set_timer_poll(int timerfd, struct itimerspec *tspec, uint32_t sec, struct p
 
 	return 0;
 }
+
+void set_dhcp_thread_status(struct ioth *stack, unsigned int ifindex, int status){
+
+	time_t timestamp = 0;
+	timestamp = ioth_confdata_read_timestamp(stack,ifindex,IOTH_CONFDATA_THREAD_DHCP4);
+	struct dhcp_timed_status  t_status= {timestamp,status};
+	ioth_confdata_forall(stack, ifindex, IOTH_CONFDATA_THREAD_DHCP4, _set_thread_status, &t_status);
+
+}
+
+
+
 
 static void consume_timer(int timerfd) {
 	uint64_t exp;
@@ -702,7 +792,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 	struct in_addr dhcp_server_add, client_addr;
 	uint32_t leasetime = 0;
 
-	int packet_socket = 0;
+	int packet_socket = -1;
 
 	pthread_cleanup_push(test_clean, NULL);
 	pthread_cleanup_push(fd_close_clean, &timerfd);
@@ -711,6 +801,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 	while (state != UNBOUND) {
 		switch (state) {
 			case INIT: {
+				set_dhcp_thread_status(stack,ifindex,INIT);
 				printf("Enter INIT \n"); 
 				int rv = iothconf_dhcp_proto(stack, ifindex, fqdn, config_flags, timestamp);
 				if (rv == 0) {
@@ -724,6 +815,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 			}
 
 			case BOUND: {
+				set_dhcp_thread_status(stack,ifindex,BOUND);
 				printf("Enter BOUND\n"); 
 				iothconf_ip_update(stack, ifindex, IOTH_CONFDATA_DHCP4_TIMESTAMP, config_flags);
 				pthread_testcancel();
@@ -733,6 +825,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 				// Imposta T1 = 50% del leasetime (leasetime / 2)
 				if (set_timer_poll(timerfd, &timerspec1, leasetime >> 1, &plfd) == 1) {
 					close(timerfd);
+					timerfd = -1;
 					return 1;
 				}
 				pthread_testcancel();
@@ -741,6 +834,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 				if (ret1 == -1) {
 					perror("Errore nella poll");
 					close(timerfd);
+					timerfd = -1;
 					return 1;
 				}
 
@@ -753,6 +847,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 					printf("t2_delta %d\n", t2_delta);
 					if (set_timer_poll(timerfd, &timerspec2, t2_delta, &plfd) == 1) {
 						close(timerfd);
+						timerfd = -1;
 						return 1;
 					}
 					state = RENEW;
@@ -762,6 +857,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 
 			case RENEW: {
 				pthread_testcancel();
+				set_dhcp_thread_status(stack,ifindex,RENEW);
 				printf("Enter RENEW \n"); 
 				read_addr(stack, ifindex, timestamp, &dhcp_server_add, &client_addr);
 				(void)config_flags;
@@ -799,6 +895,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 					}
 				}
 				ioth_close(packet_socket);
+				packet_socket =-1;
 
 				// Se T2 è scaduto
 				if (plfd.revents & POLLIN) {
@@ -808,6 +905,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 						// Carica il timer con il rimanente 1/8 del lease time
 						if (set_timer_poll(timerfd, &timerspec2, leasetime >> 3, &plfd) == 1) {
 							close(timerfd);
+							timerfd = -1;
 							return 1;
 						}
 						state = REBIND;
@@ -818,6 +916,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 
 			case REBIND: {
 				pthread_testcancel();
+				set_dhcp_thread_status(stack,ifindex,REBIND);
 				printf("Enter REBIND \n");
 				read_addr(stack, ifindex, timestamp, &dhcp_server_add, &client_addr);
 				(void)config_flags;
@@ -854,6 +953,7 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 					}
 				}
 				ioth_close(packet_socket);
+				packet_socket =-1;
 
 				// Scade il lease time finale
 				if (plfd.revents & POLLIN) {
@@ -869,12 +969,13 @@ int ioth_dhcp_thread(struct ioth *stack, unsigned int ifindex, const char *fqdn,
 				break;
 		}
 	}
-
+	set_dhcp_thread_status(stack,ifindex,UNBOUND);
 	pthread_cleanup_pop(0);
 	pthread_cleanup_pop(0);
 	pthread_cleanup_pop(0);
 
 
 	close(timerfd);
+	timerfd = -1;
 	return UNBOUND;
 }
