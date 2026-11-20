@@ -23,7 +23,7 @@
 uint8_t serveraddr[4] = {0xb,0x0, 0x0,0xa};		//11.0.0.10; indirizzo server statico 
 const char *fqdn = "host.v2.cs.unibo.it";	
 unsigned int ifindex = 2;
-struct ioth *serverstack = NULL;	
+struct ioth *serverstack;	
 uint8_t chaddr[16] = {0x00}; 		
 
 static int check_pkt(struct dhcp_pkt inbuf, size_t inbuflen, struct dhcpdata *data) {
@@ -281,7 +281,7 @@ int main(){
 
     serverstack = ioth_newstack(stack,vnl); 						
      
-    if(stack == NULL) {
+    if(serverstack == NULL) {
 		perror("stack");
 		return 1;
     } 
